@@ -1,10 +1,23 @@
-import sqlite3
-import requests
-import time
 import sys
 
+print(
+    "DEPRECATED: github_follow_bot.py has been refactored into multiple modules.\n"
+    "Please use main.py instead:\n"
+    "  python main.py --collect           # both phases\n"
+    "  python main.py --collect-users     # phase 1: discover users\n"
+    "  python main.py --collect-users-rep # phase 2: fetch repos\n"
+    "  python main.py --score\n"
+    "  python main.py --follow\n"
+    "  python main.py --top\n"
+    "  python main.py --migrate\n"
+)
+sys.exit(1)
 
-from datetime import datetime, timezone
+import sqlite3  # noqa: E402
+import requests  # noqa: E402
+import time  # noqa: E402
+
+from datetime import datetime, timezone  # noqa: E402
 
 
 
