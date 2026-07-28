@@ -129,30 +129,44 @@ class Collector:
     # Owner followers — FOLLOWBACK detection (runs every time)
     # ------------------------------------------------------------------
 
-    def scan_owner_followers(self):
+    def scan_owner_followers(self, verbose=True):
         """Check who is following the owner right now.
 
         * New followers (not in DB) are added as organic discoveries.
         * Existing followers with status FOLLOWED → marked FOLLOWBACK.
         * Total count stored for incremental future scans.
+
+        Parameters
+        ----------
+        verbose : bool
+            If True, print progress messages (default). Set to False for
+            periodic background scans to keep console output clean.
+
+        Returns
+        -------
+        list[str]
+            Usernames of newly discovered followers (empty list if none or error).
         """
         owner = self.db.get_owner()
         if not owner:
             log.info("No owner set — skipping owner follower scan.")
-            return
+            return []
 
-        print("Checking owner's followers ...")
+        if verbose:
+            print("Checking owner's followers ...")
         log.info("Scanning followers of owner: %s", owner)
 
         try:
             people = self.github.followers(owner)
         except GitHubRateLimitError as exc:
             log.warning("Rate limit (%s) fetching owner followers", exc.status_code)
-            print(f"  ⚠ Rate limit ({exc.status_code}) — skipping owner follower check")
-            return
+            if verbose:
+                print(f"  ⚠ Rate limit ({exc.status_code}) — skipping owner follower check")
+            return []
 
         added = 0
         followbacks = 0
+        new_usernames = []
 
         for person in people:
             username = person["login"]
@@ -162,6 +176,7 @@ class Collector:
                 # New follower — discovered organically
                 self.db.add_user(username, "owner_followers")
                 added += 1
+                new_usernames.append(username)
                 continue
 
             # FOLLOWBACK detection:
@@ -170,7 +185,8 @@ class Collector:
                 self.db.mark_followback(username)
                 followbacks += 1
                 log.info("FOLLOWBACK detected: %s", username)
-                print(f"  🔄 Followback: {username}")
+                if verbose:
+                    print(f"  🔄 Followback: {username}")
 
         # Store follower count for incremental detection
         self.db.store_followers_count(owner, len(people))
@@ -179,9 +195,12 @@ class Collector:
             "Owner follower scan: %d total, %d new, %d followbacks",
             len(people), added, followbacks,
         )
-        print(
-            f"  Followers: {len(people)} total, {added} new, {followbacks} followbacks"
-        )
+        if verbose:
+            print(
+                f"  Followers: {len(people)} total, {added} new, {followbacks} followbacks"
+            )
+
+        return new_usernames
 
     # ------------------------------------------------------------------
     # Phase 1 — incremental graph discovery

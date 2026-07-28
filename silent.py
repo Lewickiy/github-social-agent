@@ -10,6 +10,7 @@ import time
 
 from config import (
     DAILY_FOLLOW_LIMIT,
+    OWNER_FOLLOWER_SCAN_INTERVAL,
     SILENT_DELAY_BETWEEN_USERS,
     SILENT_DELAY_BETWEEN_REPOS,
     SILENT_DELAY_BETWEEN_REQUESTS,
@@ -17,6 +18,7 @@ from config import (
     SILENT_DELAY_BETWEEN_FOLLOWS,
     SILENT_FOLLOW_SCORE_THRESHOLD,
 )
+from collector import Collector
 from github_client import GitHubRateLimitError
 from logger import get_logger
 from scorer import Scorer
@@ -270,7 +272,11 @@ class SilentRunner:
     # ------------------------------------------------------------------
 
     def run(self):
-        """Collect repos + score per user — all with stealth delays."""
+        """Collect repos + score per user — all with stealth delays.
+
+        Also periodically checks for new owner followers and processes
+        them with priority.
+        """
         log.info("Silent mode started.")
 
         # Load owner data once for the similarity comparison
@@ -291,10 +297,43 @@ class SilentRunner:
         print(f"Processing {total} users (silent) ...")
         log.info("Silent processing: %d users", total)
 
+        # ── Periodic owner follower scanner ──
+        periodic_collector = Collector(self.db, self.github, self._shutdown)
+        owner_scan_counter = 0
+
         for idx, (username,) in enumerate(rows, 1):
             if self._shutdown.is_set():
                 print("\nShutdown requested.")
                 break
+
+            # ═══════════════════════════════════════════════════════════
+            # PERIODIC SCAN: check for new owner followers every N users
+            # ═══════════════════════════════════════════════════════════
+            if owner_scan_counter >= OWNER_FOLLOWER_SCAN_INTERVAL:
+                owner_scan_counter = 0
+                new_followers = periodic_collector.scan_owner_followers(verbose=False)
+                if new_followers:
+                    log.info(
+                        "Silent: %d new owner follower(s) discovered — processing immediately",
+                        len(new_followers),
+                    )
+                    print(f"  ★ {len(new_followers)} new owner follower(s) — processing now")
+                    for pu_idx, pu in enumerate(new_followers, 1):
+                        if self._shutdown.is_set():
+                            break
+                        # Process new owner follower with priority display
+                        self._collect_user_repos(pu, pu_idx, len(new_followers))
+                        if not self._shutdown.is_set():
+                            pu_score = self._score_user(pu, owner_langs, owner_topics)
+                            if (
+                                pu_score is not None
+                                and pu_score > SILENT_FOLLOW_SCORE_THRESHOLD
+                                and not self._shutdown.is_set()
+                            ):
+                                self._follow_user(pu, pu_score)
+                                if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
+                                    break
+            owner_scan_counter += 1
 
             # --- Collect repos for this user (with TTL skip) ---
             self._collect_user_repos(username, idx, total)

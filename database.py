@@ -141,8 +141,9 @@ class Database:
           - users already scored with the current algorithm version
             within SCORE_FRESHNESS_DAYS.
 
-        Ordered by public_repos ASC (fewer repos first) so that
-        lightweight users are processed before heavy ones.
+        Ordered by:
+          1. Owner followers (discovered_from = 'owner_followers') — priority,
+          2. Then by followers DESC (popular users first).
         """
         rows = self.conn.execute(
             """
@@ -159,7 +160,9 @@ class Database:
                   AND u.scored_at IS NOT NULL
                   AND u.scored_at >= datetime('now', ?)
               )
-            ORDER BY u.public_repos ASC
+            ORDER BY
+                CASE WHEN u.discovered_from = 'owner_followers' THEN 0 ELSE 1 END,
+                u.followers DESC
             """,
             (
                 f"-{REPO_FRESHNESS_DAYS} days",

@@ -67,7 +67,7 @@ HEADERS = _LazyHeaders()
 # BOT SETTINGS
 # =====================================================
 
-DAILY_FOLLOW_LIMIT = 200
+DAILY_FOLLOW_LIMIT = 50
 
 FOLLOW_DELAY = 60
 
@@ -79,17 +79,23 @@ LOG_FILE = "github_social.log"
 # SILENT MODE — human-like intervals (seconds)
 # =====================================================
 
-SILENT_DELAY_BETWEEN_USERS = 60  # pause between users (2 min)
-SILENT_DELAY_BETWEEN_REPOS = 20  # pause between repos of one user
-SILENT_DELAY_BETWEEN_REQUESTS = 5  # pause between API calls within a repo
-SILENT_DELAY_BETWEEN_SCORES = 10  # pause between scoring users
-SILENT_DELAY_BETWEEN_FOLLOWS = 30  # pause between follow actions in silent mode
+SILENT_DELAY_BETWEEN_USERS = 2  # pause between users (2 min)
+SILENT_DELAY_BETWEEN_REPOS = 2  # pause between repos of one user
+SILENT_DELAY_BETWEEN_REQUESTS = 1  # pause between API calls within a repo
+SILENT_DELAY_BETWEEN_SCORES = 1  # pause between scoring users
+SILENT_DELAY_BETWEEN_FOLLOWS = 2  # pause between follow actions in silent mode
 
 # =====================================================
 # FOLLOW SCORING
 # =====================================================
 
 SILENT_FOLLOW_SCORE_THRESHOLD = 35  # minimum score to auto-follow in silent mode
+
+# =====================================================
+# OWNER FOLLOWER SCAN — cyclic check in silent mode
+# =====================================================
+
+OWNER_FOLLOWER_SCAN_INTERVAL = 20  # check for new owner followers every N processed users
 
 # =====================================================
 # SCORING
@@ -103,5 +109,5 @@ CURRENT_SCORE_VERSION = 4
 
 REPO_FRESHNESS_DAYS = 7       # skip repo fetch if collected within this period
 OWNER_SYNC_DAYS = 14          # re-sync owner repos/langs at most this often
-SCORE_FRESHNESS_DAYS = 30     # skip scoring if scored within this period
-FOLLOWER_SCAN_DAYS = 7        # re-scan follower graph at most this often
+SCORE_FRESHNESS_DAYS = 20     # skip scoring if scored within this period
+FOLLOWER_SCAN_DAYS = 5        # re-scan follower graph at most this often
