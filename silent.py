@@ -9,10 +9,13 @@ import threading
 import time
 
 from config import (
+    DAILY_FOLLOW_LIMIT,
     SILENT_DELAY_BETWEEN_USERS,
     SILENT_DELAY_BETWEEN_REPOS,
     SILENT_DELAY_BETWEEN_REQUESTS,
     SILENT_DELAY_BETWEEN_SCORES,
+    SILENT_DELAY_BETWEEN_FOLLOWS,
+    SILENT_FOLLOW_SCORE_THRESHOLD,
 )
 from github_client import GitHubRateLimitError
 from logger import get_logger
@@ -116,19 +119,25 @@ class SilentRunner:
                 if self._shutdown.is_set():
                     return
 
-                repo_id = self.db.save_repository(username, repo)
+                repo_name = repo["name"]
+                repo_id, repo_changed = self.db.save_repository(username, repo)
+                if repo_changed:
+                    print(f"    📦 Repo: {repo_name}")
+                else:
+                    print(f"    📦 Repo: {repo_name} (unchanged)")
 
                 # Languages
                 try:
-                    langs = self.github.repo_languages(username, repo["name"])
+                    langs = self.github.repo_languages(username, repo_name)
                 except GitHubRateLimitError as exc:
-                    log.warning("Rate limit (%s) on langs %s/%s", exc.status_code, username, repo["name"])
+                    log.warning("Rate limit (%s) on langs %s/%s", exc.status_code, username, repo_name)
                     print(f"  ⚠ Rate limit ({exc.status_code})")
                     if self._handle_rate_limit(exc) == "shutdown":
                         return
                     break
                 if langs:
-                    self.db.save_repository_languages(repo_id, langs)
+                    if self.db.save_repository_languages(repo_id, langs):
+                        print(f"      🔤 Languages saved: {', '.join(langs.keys())}")
 
                 if not self._sleep(SILENT_DELAY_BETWEEN_REQUESTS):
                     return
@@ -136,7 +145,8 @@ class SilentRunner:
                 # Topics
                 topics = repo.get("topics", [])
                 if topics:
-                    self.db.save_repository_topics(repo_id, topics)
+                    if self.db.save_repository_topics(repo_id, topics):
+                        print(f"      🏷  Topics saved: {', '.join(topics)}")
 
                 if not self._sleep(SILENT_DELAY_BETWEEN_REPOS):
                     return
@@ -148,12 +158,16 @@ class SilentRunner:
     # ------------------------------------------------------------------
 
     def _score_user(self, username, owner_langs=None, owner_topics=None):
-        """Score a single user with optional owner similarity data."""
+        """Score a single user with optional owner similarity data.
+
+        Returns the score (int) on success, or None on failure.
+        """
         info = self.github.user(username)
         if info:
             lang_list = self.db.user_languages(username)
             topic_list = self.db.user_topics(username)
             repo_days = self.db.user_repo_recency(username)
+            print(f"    📊 Calculating score for {username} ...")
             score = Scorer.calculate(
                 info, lang_list, topic_list,
                 owner_langs=owner_langs,
@@ -161,44 +175,49 @@ class SilentRunner:
                 repo_days=repo_days,
             )
             self.db.update_score(username, score, info)
-            return True
+            print(f"    ✅ Score: {score}")
+            return score
         log.warning("No profile data for %s", username)
-        return False
+        print(f"    ⚠ No profile data for {username}")
+        return None
+
+    # ------------------------------------------------------------------
+    # Auto-follow high-score users
+    # ------------------------------------------------------------------
+
+    def _follow_user(self, username, score):
+        """Follow *username* if daily budget allows.  Returns True on success."""
+        done_today = self.db.today_follows()
+        remaining = DAILY_FOLLOW_LIMIT - done_today
+        if remaining <= 0:
+            log.info("Daily follow limit reached (%d/%d).", done_today, DAILY_FOLLOW_LIMIT)
+            print(f"    ⛔ Daily follow limit reached ({done_today}/{DAILY_FOLLOW_LIMIT})")
+            return False
+
+        if self.github.already_following(username):
+            log.debug("Already following %s — skipped", username)
+            print(f"    👤 Already following {username}")
+            return False
+
+        if self.github.follow(username):
+            self.db.mark_followed(username)
+            log.info("Followed %s (score %d)", username, score)
+            print(f"    🤝 Followed {username} (score {score}) [{done_today + 1}/{DAILY_FOLLOW_LIMIT}]")
+            return True
+        else:
+            log.warning("Failed to follow %s", username)
+            print(f"    ❌ Failed to follow {username}")
+            return False
 
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
     def run(self):
-        """Collect repos then score — all with stealth delays."""
+        """Collect repos + score per user — all with stealth delays."""
         log.info("Silent mode started.")
 
-        # --- Phase 1: collect repos for all known users ---
-        rows = self.db.conn.execute(
-            "SELECT username FROM users"
-        ).fetchall()
-
-        total = len(rows)
-        print(f"Collecting repos for {total} users (silent) ...")
-        log.info("Silent collection: %d users", total)
-
-        for idx, (username,) in enumerate(rows, 1):
-            if self._shutdown.is_set():
-                print("\nShutdown requested.")
-                break
-
-            self._collect_user_repos(username, idx, total)
-
-            if not self._sleep(SILENT_DELAY_BETWEEN_USERS):
-                break
-
-        if self._shutdown.is_set():
-            log.info("Silent collection interrupted by shutdown.")
-            return
-
-        log.info("Silent collection finished. Starting scoring.")
-
-        # --- Phase 2: score unscored users ---
+        # Load owner data once for the similarity comparison
         owner_username = self.db.get_owner()
         owner_langs = None
         owner_topics = None
@@ -210,21 +229,36 @@ class SilentRunner:
             owner_topics = self.db.user_topics(owner_username)
             log.info("Owner profile loaded for scoring: %s", owner_username)
 
-        users = self.db.unscored_users()
-        if users:
-            print(f"\nScoring {len(users)} users (silent) ...")
-            log.info("Silent scoring: %d users", len(users))
+        rows = self.db.users_for_silent_processing()
 
-            for (username,) in users:
-                if self._shutdown.is_set():
-                    print("\nShutdown requested.")
-                    break
+        total = len(rows)
+        print(f"Processing {total} users (silent) ...")
+        log.info("Silent processing: %d users", total)
 
-                print(f"  Scoring {username}")
-                self._score_user(username, owner_langs, owner_topics)
+        for idx, (username,) in enumerate(rows, 1):
+            if self._shutdown.is_set():
+                print("\nShutdown requested.")
+                break
 
-                if not self._sleep(SILENT_DELAY_BETWEEN_SCORES):
-                    break
+            # --- Collect repos for this user ---
+            self._collect_user_repos(username, idx, total)
+
+            # --- Immediately score this user ---
+            if not self._shutdown.is_set():
+                score = self._score_user(username, owner_langs, owner_topics)
+
+                # --- Auto-follow if score is high enough ---
+                if (
+                    score is not None
+                    and score > SILENT_FOLLOW_SCORE_THRESHOLD
+                    and not self._shutdown.is_set()
+                ):
+                    self._follow_user(username, score)
+                    if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
+                        break
+
+            if not self._sleep(SILENT_DELAY_BETWEEN_USERS):
+                break
 
         if self._shutdown.is_set():
             log.info("Silent mode interrupted by shutdown.")

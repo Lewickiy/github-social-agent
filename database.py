@@ -2,7 +2,7 @@ import sqlite3
 from datetime import datetime, timezone
 from config import DATABASE
 
-CURRENT_SCORE_VERSION = 3
+CURRENT_SCORE_VERSION = 4
 
 
 class Database:
@@ -112,6 +112,33 @@ class Database:
         ).fetchall()
         return rows
 
+    def users_for_silent_processing(self):
+        """Return users eligible for silent-mode collection + scoring.
+
+        Excludes:
+          - the owner,
+          - users already scored with the current algorithm version
+            within the last 7 days (repos are only re-collected weekly).
+
+        Ordered by public_repos ASC (fewer repos first) so that
+        lightweight users are processed before heavy ones.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT u.username
+            FROM users u
+            WHERE u.owner = 0
+              AND NOT (
+                  u.score_version = ?
+                  AND u.scored_at IS NOT NULL
+                  AND u.scored_at >= datetime('now', '-7 days')
+              )
+            ORDER BY u.public_repos ASC
+            """,
+            (CURRENT_SCORE_VERSION,),
+        ).fetchall()
+        return rows
+
     def mark_followed(self, username):
         now = datetime.now(timezone.utc).isoformat()
 
@@ -154,10 +181,15 @@ class Database:
     # --------------------------------------------------
 
     def save_repository(self, user_id, repo_data):
-        """Insert or update a repository record.  Returns the local repo id."""
-        now = datetime.now(timezone.utc).isoformat()
+        """Insert or update a repository record.  Returns (repo_id, changed).
 
-        self.conn.execute(
+        *changed* is True when the row was inserted or at least one field
+        was actually updated; False when everything is already up-to-date.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        gh_id = repo_data["id"]
+
+        cur = self.conn.execute(
             """
             INSERT INTO repositories (
                 github_repository_id, user_id, name, description, html_url,
@@ -176,9 +208,19 @@ class Database:
                 default_branch        = excluded.default_branch,
                 updated_at            = excluded.updated_at,
                 repository_updated_at = excluded.repository_updated_at
+            WHERE name                  IS NOT excluded.name
+               OR description           IS NOT excluded.description
+               OR html_url              IS NOT excluded.html_url
+               OR stars                 != excluded.stars
+               OR forks                 != excluded.forks
+               OR watchers              != excluded.watchers
+               OR is_fork               != excluded.is_fork
+               OR is_archived           != excluded.is_archived
+               OR default_branch        IS NOT excluded.default_branch
+               OR repository_updated_at IS NOT excluded.repository_updated_at
             """,
             (
-                repo_data["id"],
+                gh_id,
                 user_id,
                 repo_data["name"],
                 repo_data.get("description"),
@@ -195,13 +237,14 @@ class Database:
                 repo_data.get("updated_at"),
             ),
         )
+        changed = cur.rowcount > 0
         self.conn.commit()
 
         row = self.conn.execute(
             "SELECT id FROM repositories WHERE github_repository_id = ?",
-            (repo_data["id"],),
+            (gh_id,),
         ).fetchone()
-        return row[0]
+        return row[0], changed
 
     # --------------------------------------------------
     # Languages
@@ -222,25 +265,45 @@ class Database:
         return row[0]
 
     def save_repository_languages(self, repository_id, language_bytes):
-        """Save language weights for a repository.
+        """Save language weights for a repository.  Returns True if changed.
 
         *language_bytes* is a dict like {"Java": 150000, "Python": 50000}.
         Weights are stored as percentages (0-100, float).
+        Skips the write entirely if the stored data already matches.
         """
         total = sum(language_bytes.values())
         if total == 0:
-            return
+            return False
 
-        # Clear old entries for this repo (re-score idempotency)
+        # Build the new set of {lang_name: weight}
+        new_langs = {
+            name: round((bytes_ / total) * 100, 2)
+            for name, bytes_ in language_bytes.items()
+        }
+
+        # Compare with existing data
+        existing = self.conn.execute(
+            """
+            SELECT l.name, rl.weight
+            FROM repository_languages rl
+            JOIN languages l ON l.id = rl.language_id
+            WHERE rl.repository_id = ?
+            """,
+            (repository_id,),
+        ).fetchall()
+
+        existing_map = {name: weight for name, weight in existing}
+        if existing_map == new_langs:
+            return False
+
+        # Clear old entries and insert new
         self.conn.execute(
             "DELETE FROM repository_languages WHERE repository_id = ?",
             (repository_id,),
         )
 
-        for lang_name, byte_count in language_bytes.items():
-            weight = round((byte_count / total) * 100, 2)
+        for lang_name, weight in new_langs.items():
             lang_id = self.ensure_language(lang_name)
-
             self.conn.execute(
                 """
                 INSERT INTO repository_languages
@@ -251,6 +314,7 @@ class Database:
             )
 
         self.conn.commit()
+        return True
 
     # --------------------------------------------------
     # Developer profile
@@ -333,11 +397,28 @@ class Database:
         return row[0]
 
     def save_repository_topics(self, repository_id, topics):
-        """Save topics for a repository (normalised many-to-many).
+        """Save topics for a repository.  Returns True if changed.
 
         *topics* is a list of topic strings from the GitHub API.
+        Skips the write entirely if the stored data already matches.
         """
-        # Clear old entries for this repo (idempotent re-collection)
+        new_set = set(topics)
+
+        existing = self.conn.execute(
+            """
+            SELECT t.name
+            FROM repository_topics rt
+            JOIN topics t ON t.id = rt.topic_id
+            WHERE rt.repository_id = ?
+            """,
+            (repository_id,),
+        ).fetchall()
+
+        existing_set = {row[0] for row in existing}
+        if existing_set == new_set:
+            return False
+
+        # Clear old entries and insert new
         self.conn.execute(
             "DELETE FROM repository_topics WHERE repository_id = ?",
             (repository_id,),
@@ -354,6 +435,7 @@ class Database:
             )
 
         self.conn.commit()
+        return True
 
     def user_topics(self, username):
         """Return all unique topics across the user's repositories."""

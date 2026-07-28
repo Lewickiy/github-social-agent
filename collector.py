@@ -170,7 +170,7 @@ class Collector:
                 if self._shutdown.is_set():
                     return
 
-                repo_id = self.db.save_repository(username, repo)
+                repo_id, _ = self.db.save_repository(username, repo)
 
                 try:
                     langs = self.github.repo_languages(username, repo["name"])

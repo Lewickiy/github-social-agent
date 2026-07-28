@@ -84,7 +84,8 @@ class Scorer:
         # ── Similarity score (0-65) ────────────────────
 
         if owner_langs is not None:
-            score += Scorer._language_similarity(language_list, owner_langs)
+            user_langs = dict(language_list) if language_list else {}
+            score += Scorer._language_similarity(user_langs, owner_langs)
 
         if owner_topics is not None:
             score += Scorer._topic_similarity(
