@@ -98,7 +98,17 @@ class SilentRunner:
     # ------------------------------------------------------------------
 
     def _collect_user_repos(self, username, idx, total):
-        """Fetch repos + languages + topics for one user."""
+        """Fetch repos + languages + topics for one user.
+
+        Skips if repos were fetched recently (TTL check).
+        Skips if user is deleted.
+        """
+        # ── TTL check — skip if repos are fresh ──
+        if self.db.is_repos_fresh(username):
+            log.debug("[%d/%d] Repos for %s are fresh — skipping", idx, total, username)
+            print(f"[{idx}/{total}] {username} (repos fresh — skipped)")
+            return
+
         while True:
             if self._shutdown.is_set():
                 return
@@ -106,6 +116,27 @@ class SilentRunner:
             print(f"[{idx}/{total}] {username}")
             log.debug("[%d/%d] Fetching repos for %s", idx, total, username)
 
+            # ── Check user exists ──
+            try:
+                info = self.github.user(username)
+            except GitHubRateLimitError as exc:
+                log.warning("Rate limit (%s) checking user %s", exc.status_code, username)
+                print(f"  ⚠ Rate limit ({exc.status_code})")
+                if self._handle_rate_limit(exc) == "shutdown":
+                    return
+                continue
+
+            if info is None:
+                self.db.conn.execute(
+                    "UPDATE users SET status = 'DELETED' WHERE username = ?",
+                    (username,),
+                )
+                self.db.conn.commit()
+                log.info("User %s not found — marked DELETED", username)
+                print(f"  👻 {username} — deleted, skipped")
+                return
+
+            # ── Fetch repos ──
             try:
                 repos = self.github.repos(username)
             except GitHubRateLimitError as exc:
@@ -151,6 +182,9 @@ class SilentRunner:
                 if not self._sleep(SILENT_DELAY_BETWEEN_REPOS):
                     return
 
+            # ── Mark repos as fetched (TTL) ──
+            self.db.mark_repos_fetched(username)
+
             break  # user done
 
     # ------------------------------------------------------------------
@@ -160,26 +194,43 @@ class SilentRunner:
     def _score_user(self, username, owner_langs=None, owner_topics=None):
         """Score a single user with optional owner similarity data.
 
+        Uses cached profile info when available to avoid API calls.
         Returns the score (int) on success, or None on failure.
         """
-        info = self.github.user(username)
-        if info:
-            lang_list = self.db.user_languages(username)
-            topic_list = self.db.user_topics(username)
-            repo_days = self.db.user_repo_recency(username)
-            print(f"    📊 Calculating score for {username} ...")
-            score = Scorer.calculate(
-                info, lang_list, topic_list,
-                owner_langs=owner_langs,
-                owner_topics=owner_topics,
-                repo_days=repo_days,
-            )
-            self.db.update_score(username, score, info)
-            print(f"    ✅ Score: {score}")
-            return score
-        log.warning("No profile data for %s", username)
-        print(f"    ⚠ No profile data for {username}")
-        return None
+        # ── Try cached info first ──
+        info = self.db.get_user_cached_info(username)
+
+        if info and info.get("public_repos") is not None and info.get("followers") is not None:
+            log.debug("Silent: using cached info for %s", username)
+        else:
+            # Cache miss — fetch from API
+            try:
+                info = self.github.user(username)
+            except GitHubRateLimitError as exc:
+                log.warning("Rate limit (%s) fetching user %s", exc.status_code, username)
+                print(f"  ⚠ Rate limit ({exc.status_code})")
+                if self._handle_rate_limit(exc) == "shutdown":
+                    return None
+                info = self.github.user(username)
+
+            if not info:
+                log.warning("No profile data for %s", username)
+                print(f"    ⚠ No profile data for {username}")
+                return None
+
+        lang_list = self.db.user_languages(username)
+        topic_list = self.db.user_topics(username)
+        repo_days = self.db.user_repo_recency(username)
+        print(f"    📊 Calculating score for {username} ...")
+        score = Scorer.calculate(
+            info, lang_list, topic_list,
+            owner_langs=owner_langs,
+            owner_topics=owner_topics,
+            repo_days=repo_days,
+        )
+        self.db.update_score(username, score, info)
+        print(f"    ✅ Score: {score}")
+        return score
 
     # ------------------------------------------------------------------
     # Auto-follow high-score users
@@ -240,7 +291,7 @@ class SilentRunner:
                 print("\nShutdown requested.")
                 break
 
-            # --- Collect repos for this user ---
+            # --- Collect repos for this user (with TTL skip) ---
             self._collect_user_repos(username, idx, total)
 
             # --- Immediately score this user ---

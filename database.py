@@ -1,8 +1,11 @@
 import sqlite3
 from datetime import datetime, timezone
-from config import DATABASE
-
-CURRENT_SCORE_VERSION = 4
+from config import (
+    DATABASE,
+    CURRENT_SCORE_VERSION,
+    REPO_FRESHNESS_DAYS,
+    SCORE_FRESHNESS_DAYS,
+)
 
 
 class Database:
@@ -90,12 +93,13 @@ class Database:
           - has no repository data yet (repos not collected),  OR
           - repos were collected AFTER the last scoring (stale score).
 
-        The owner is excluded.
+        The owner and deleted users are excluded.
         """
         rows = self.conn.execute(
             """
             SELECT u.username FROM users u
             WHERE u.owner = 0
+              AND u.status != 'DELETED'
               AND (   (u.score = 0 AND u.scored_at IS NULL)
                    OR u.score_version < ?
                    OR NOT EXISTS (
@@ -117,8 +121,10 @@ class Database:
 
         Excludes:
           - the owner,
+          - deleted users,
+          - users whose repos were fetched within REPO_FRESHNESS_DAYS,
           - users already scored with the current algorithm version
-            within the last 7 days (repos are only re-collected weekly).
+            within SCORE_FRESHNESS_DAYS.
 
         Ordered by public_repos ASC (fewer repos first) so that
         lightweight users are processed before heavy ones.
@@ -128,14 +134,43 @@ class Database:
             SELECT u.username
             FROM users u
             WHERE u.owner = 0
+              AND u.status != 'DELETED'
+              AND (
+                  u.repos_fetched_at IS NULL
+                  OR u.repos_fetched_at < datetime('now', ?)
+              )
               AND NOT (
                   u.score_version = ?
                   AND u.scored_at IS NOT NULL
-                  AND u.scored_at >= datetime('now', '-7 days')
+                  AND u.scored_at >= datetime('now', ?)
               )
             ORDER BY u.public_repos ASC
             """,
-            (CURRENT_SCORE_VERSION,),
+            (
+                f"-{REPO_FRESHNESS_DAYS} days",
+                CURRENT_SCORE_VERSION,
+                f"-{SCORE_FRESHNESS_DAYS} days",
+            ),
+        ).fetchall()
+        return rows
+
+    def users_for_repo_collection(self):
+        """Return users that need repo re-collection.
+
+        Includes users whose repos_fetched_at is NULL (never collected)
+        or older than REPO_FRESHNESS_DAYS.  Excludes deleted users.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT username FROM users
+            WHERE status != 'DELETED'
+              AND (
+                  repos_fetched_at IS NULL
+                  OR repos_fetched_at < datetime('now', ?)
+              )
+            ORDER BY repos_fetched_at ASC NULLS FIRST
+            """,
+            (f"-{REPO_FRESHNESS_DAYS} days",),
         ).fetchall()
         return rows
 
@@ -160,6 +195,96 @@ class Database:
             (username, "FOLLOW", now),
         )
 
+        self.conn.commit()
+
+    def mark_followback(self, username):
+        """Mark a user as FOLLOWBACK — they followed us after we followed them."""
+        self.conn.execute(
+            "UPDATE users SET status = 'FOLLOWBACK' WHERE username = ?",
+            (username,),
+        )
+        self.conn.commit()
+
+    # --------------------------------------------------
+    # Cached profile info (avoid redundant API calls)
+    # --------------------------------------------------
+
+    def get_user_cached_info(self, username):
+        """Return cached user profile from the users table, or None."""
+        row = self.conn.execute(
+            """
+            SELECT username, public_repos, followers, bio, company, score, scored_at, status
+            FROM users WHERE username = ?
+            """,
+            (username,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "login": row[0],
+            "public_repos": row[1] or 0,
+            "followers": row[2] or 0,
+            "bio": row[3],
+            "company": row[4],
+            "score": row[5],
+            "scored_at": row[6],
+            "status": row[7],
+        }
+
+    # --------------------------------------------------
+    # Optimisation helpers — freshness / TTL
+    # --------------------------------------------------
+
+    def mark_repos_fetched(self, username):
+        """Record that repos for *username* were fetched right now."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE users SET repos_fetched_at = ? WHERE username = ?",
+            (now, username),
+        )
+        self.conn.commit()
+
+    def is_repos_fresh(self, username, days=None):
+        """Return True if repos for *username* were fetched within *days*."""
+        if days is None:
+            days = REPO_FRESHNESS_DAYS
+        row = self.conn.execute(
+            """
+            SELECT repos_fetched_at FROM users
+            WHERE username = ?
+              AND repos_fetched_at IS NOT NULL
+              AND repos_fetched_at >= datetime('now', ?)
+            """,
+            (username, f"-{days} days"),
+        ).fetchone()
+        return row is not None
+
+    # --------------------------------------------------
+    # Followers count (incremental scan detection)
+    # --------------------------------------------------
+
+    def get_followers_count(self, username):
+        """Return the stored follower count, or 0 if unknown."""
+        row = self.conn.execute(
+            "SELECT followers_count FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return (row[0] or 0) if row else 0
+
+    def store_followers_count(self, username, count):
+        """Persist the current follower count and scan timestamp."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            """
+            UPDATE users
+            SET followers_count = ?,
+                followers_scanned_at = ?
+            WHERE username = ?
+            """,
+            (count, now, username),
+        )
         self.conn.commit()
 
     # --------------------------------------------------

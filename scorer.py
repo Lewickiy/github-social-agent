@@ -179,22 +179,33 @@ class Scorer:
             print("Scoring", username)
             log.debug("Scoring %s", username)
 
-            info = self.github.user(username)
+            # ── Try cached info first (avoid API call) ──
+            info = self.db.get_user_cached_info(username)
 
-            if info:
-                lang_list = self.db.user_languages(username)
-                topic_list = self.db.user_topics(username)
-                repo_days = self.db.user_repo_recency(username)
-
-                score = self.calculate(
-                    info, lang_list, topic_list,
-                    owner_langs=owner_langs,
-                    owner_topics=owner_topics,
-                    repo_days=repo_days,
-                )
-                self.db.update_score(username, score, info)
+            if info and info.get("public_repos") is not None and info.get("followers") is not None:
+                log.debug("Using cached info for %s", username)
             else:
-                log.warning("No profile data returned for %s", username)
+                # Cache miss or incomplete data — fetch from API
+                try:
+                    info = self.github.user(username)
+                except Exception:
+                    info = None
+
+                if not info:
+                    log.warning("No profile data returned for %s", username)
+                    continue
+
+            lang_list = self.db.user_languages(username)
+            topic_list = self.db.user_topics(username)
+            repo_days = self.db.user_repo_recency(username)
+
+            score = self.calculate(
+                info, lang_list, topic_list,
+                owner_langs=owner_langs,
+                owner_topics=owner_topics,
+                repo_days=repo_days,
+            )
+            self.db.update_score(username, score, info)
 
             time.sleep(1)
 

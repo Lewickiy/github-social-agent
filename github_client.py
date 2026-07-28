@@ -5,6 +5,9 @@ from logger import get_logger
 
 log = get_logger(__name__)
 
+# Default timeout for all GitHub API requests (seconds).
+_REQUEST_TIMEOUT = 30
+
 
 class GitHubRateLimitError(Exception):
     """Raised when GitHub returns 401 or 403 (rate-limit / auth issue)."""
@@ -24,6 +27,8 @@ class GithubClient:
     # --------------------------------------------------
 
     def request(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", _REQUEST_TIMEOUT)
+
         r = requests.request(
             method,
             API + url,
@@ -33,6 +38,10 @@ class GithubClient:
 
         if r.status_code in (401, 403):
             raise GitHubRateLimitError(r.status_code, url, r)
+
+        if r.status_code == 404:
+            log.warning("GitHub 404 (not found) for %s", url)
+            return None
 
         if r.status_code >= 400:
             log.error("GitHub HTTP %s for %s", r.status_code, url)
@@ -76,6 +85,7 @@ class GithubClient:
         r = requests.put(
             f"{API}/user/following/{username}",
             headers=HEADERS,
+            timeout=_REQUEST_TIMEOUT,
         )
         return r.status_code == 204
 
@@ -84,6 +94,7 @@ class GithubClient:
         r = requests.get(
             f"{API}/user/following/{username}",
             headers=HEADERS,
+            timeout=_REQUEST_TIMEOUT,
         )
         return r.status_code == 204
 

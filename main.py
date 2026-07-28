@@ -103,15 +103,14 @@ def main():
 
     github = GithubClient()
 
-    # ── Sync owner profile on every startup ──────────────────────
-    # Collect / refresh repos, languages, and topics for MY_USERNAME
-    # so that similarity scoring always has fresh baseline data.
+    # ── Sync owner profile on startup (TTL-based) ───────────────
     # Skipped for modes that don't interact with the GitHub API.
-    skip_sync = {"--migrate", "--migrate-status", "--help", "--collect-self"}
+    skip_sync = {"--migrate", "--migrate-status", "--help", "--collect-self", "--top", "--profile"}
     if not skip_sync & set(sys.argv):
         log.info("Startup: syncing owner profile for %s", MY_USERNAME)
-        print(f"Syncing owner profile for {MY_USERNAME} ...")
-        Collector(db, github, shutdown_event=_shutdown).collect_self()
+        collector = Collector(db, github, shutdown_event=_shutdown)
+        collector.sync_owner()                  # repos — only if stale (> 14 days)
+        collector.scan_owner_followers()        # followers — always (FOLLOWBACK detection)
 
     try:
         if "--collect-self" in sys.argv:
