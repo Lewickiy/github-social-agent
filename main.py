@@ -20,6 +20,7 @@ import sys
 import threading
 
 from collector import Collector
+from company_worker import CompanyWorker
 from config import MY_USERNAME
 from database import Database
 from follow_engine import FollowEngine
@@ -80,6 +81,12 @@ def _print_profile(profile):
         print(f"Company:        {profile['company']}")
     if topics:
         print(f"Topics:         {' '.join(topics)}")
+    companies = profile.get("companies", [])
+    if companies:
+        print(f"Companies:")
+        for login, name, ctype in companies:
+            label = name or login
+            print(f"  @{login:<20} {label} ({ctype or '?'})")
     print()
     print(f"Score:          {profile['score']}")
     print()
@@ -111,6 +118,13 @@ def main():
         collector = Collector(db, github, shutdown_event=_shutdown)
         collector.sync_owner()                  # repos — only if stale (> 14 days)
         collector.scan_owner_followers()        # followers — always (FOLLOWBACK detection)
+
+    # ── Start background company worker for long-running modes ──
+    long_running = {"--silent", "--collect", "--collect-users", "--collect-users-rep", "--score", "--follow"}
+    company_worker = None
+    if long_running & set(sys.argv):
+        company_worker = CompanyWorker(_shutdown)
+        company_worker.start()
 
     try:
         if "--collect-self" in sys.argv:

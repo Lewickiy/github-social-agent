@@ -195,6 +195,11 @@ class Scorer:
                     log.warning("No profile data returned for %s", username)
                     continue
 
+            # ── Parse @-mentions from company field ──
+            company_text = info.get("company")
+            if company_text:
+                self.db.extract_and_save_companies(username, company_text)
+
             lang_list = self.db.user_languages(username)
             topic_list = self.db.user_topics(username)
             repo_days = self.db.user_repo_recency(username)

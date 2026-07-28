@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from datetime import datetime, timezone
 from config import (
@@ -6,6 +7,20 @@ from config import (
     REPO_FRESHNESS_DAYS,
     SCORE_FRESHNESS_DAYS,
 )
+
+# ── Company parser (pure function, no external dependencies) ──
+_COMPANY_RE = re.compile(r"@([a-zA-Z0-9_-]+)")
+
+
+def extract_companies(text):
+    """Extract @-prefixed GitHub organisation logins from *text*.
+
+    Returns a list of lowercase login strings.
+    Returns an empty list if *text* is None or contains no @-mentions.
+    """
+    if not text:
+        return []
+    return [m.group(1).lower() for m in _COMPANY_RE.finditer(text)]
 
 
 class Database:
@@ -577,6 +592,138 @@ class Database:
         ).fetchall()
         return [row[0] for row in rows]
 
+    # --------------------------------------------------
+    # Companies
+    # --------------------------------------------------
+
+    def extract_and_save_companies(self, username, company_text):
+        """Parse @-mentions from *company_text* and persist companies + links.
+
+        For each @login found:
+          1. INSERT OR IGNORE into companies (login only, api_fetched_at=NULL).
+          2. INSERT OR IGNORE into user_companies.
+
+        The background worker later enriches company data via the API.
+        """
+        logins = extract_companies(company_text)
+        if not logins:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        for login in logins:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO companies (login, created_at) VALUES (?, ?)",
+                (login, now),
+            )
+            comp_id = self.conn.execute(
+                "SELECT id FROM companies WHERE login = ?", (login,)
+            ).fetchone()
+            if comp_id:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO user_companies (username, company_id) VALUES (?, ?)",
+                    (username, comp_id[0]),
+                )
+        self.conn.commit()
+
+    def get_next_company_to_fetch(self):
+        """Return the next company that needs API enrichment.
+
+        Priority:
+          1. Companies never fetched (api_fetched_at IS NULL).
+          2. Companies whose github_updated_at > updated_at (stale).
+          3. Oldest api_fetched_at.
+
+        Returns (id, login, updated_at) or None.
+        """
+        row = self.conn.execute(
+            """
+            SELECT id, login, updated_at FROM companies
+            WHERE api_fetched_at IS NULL
+               OR (github_updated_at IS NOT NULL
+                   AND updated_at IS NOT NULL
+                   AND github_updated_at > updated_at)
+            ORDER BY api_fetched_at ASC NULLS FIRST
+            LIMIT 1
+            """
+        ).fetchone()
+        return row
+
+    def update_company_data(self, company_id, api_data):
+        """Save full GitHub API response for a company."""
+        now = datetime.now(timezone.utc).isoformat()
+        gh_updated = api_data.get("updated_at")
+
+        self.conn.execute(
+            """
+            UPDATE companies SET
+                github_id         = ?,
+                name              = ?,
+                description       = ?,
+                html_url          = ?,
+                blog              = ?,
+                location          = ?,
+                email             = ?,
+                twitter_username  = ?,
+                public_repos      = ?,
+                followers         = ?,
+                following         = ?,
+                avatar_url        = ?,
+                company_type      = ?,
+                github_created_at = ?,
+                github_updated_at = ?,
+                updated_at        = ?,
+                api_fetched_at    = ?
+            WHERE id = ?
+            """,
+            (
+                api_data.get("id"),
+                api_data.get("name"),
+                api_data.get("bio") or api_data.get("description"),
+                api_data.get("html_url"),
+                api_data.get("blog"),
+                api_data.get("location"),
+                api_data.get("email"),
+                api_data.get("twitter_username"),
+                api_data.get("public_repos", 0),
+                api_data.get("followers", 0),
+                api_data.get("following", 0),
+                api_data.get("avatar_url"),
+                api_data.get("type"),
+                api_data.get("created_at"),
+                gh_updated,
+                now,
+                now,
+                company_id,
+            ),
+        )
+        self.conn.commit()
+
+    def mark_company_fetched(self, company_id):
+        """Mark a company as fetched (even if no data was returned).
+
+        Prevents infinite retries for non-existent organisations.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE companies SET api_fetched_at = ? WHERE id = ?",
+            (now, company_id),
+        )
+        self.conn.commit()
+
+    def get_user_companies(self, username):
+        """Return list of company logins linked to *username*."""
+        rows = self.conn.execute(
+            """
+            SELECT c.login, c.name, c.company_type
+            FROM user_companies uc
+            JOIN companies c ON c.id = uc.company_id
+            WHERE uc.username = ?
+            ORDER BY c.login
+            """,
+            (username,),
+        ).fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
+
     def developer_profile(self, username):
         """Build a full developer profile dict for display."""
         user_row = self.conn.execute(
@@ -594,6 +741,8 @@ class Database:
         repo_count = self.user_repo_count(username)
         topics = self.user_topics(username)
 
+        companies = self.get_user_companies(username)
+
         return {
             "username": user_row[0],
             "score": user_row[1],
@@ -604,4 +753,5 @@ class Database:
             "repo_count": repo_count,
             "languages": langs,
             "topics": topics,
+            "companies": companies,
         }

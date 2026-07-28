@@ -360,6 +360,11 @@ class Collector:
                 log.info("User %s not found — marked DELETED", username)
                 return
 
+            # ── Parse @-mentions from company field ──
+            company_text = info.get("company")
+            if company_text:
+                self.db.extract_and_save_companies(username, company_text)
+
             # ── Fetch repos ──
             try:
                 repos = self.github.repos(username)
