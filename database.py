@@ -6,6 +6,7 @@ from config import (
     CURRENT_SCORE_VERSION,
     REPO_FRESHNESS_DAYS,
     SCORE_FRESHNESS_DAYS,
+    SILENT_REPO_CHECK_FRESHNESS_DAYS,
 )
 
 # ── Company parser (pure function, no external dependencies) ──
@@ -278,6 +279,43 @@ class Database:
             (username, f"-{days} days"),
         ).fetchone()
         return row is not None
+
+    def is_repo_fresh(self, repo_id, days=None):
+        """Return True if *repo_id* was checked within *days*.
+
+        Per-repo TTL used by silent mode to skip the per-repo
+        ``/languages`` API call when the repo was already verified
+        recently.  A repo with `last_checked_at IS NULL` is treated
+        as fresh = False (never checked), so it will always be fetched.
+        """
+        if days is None:
+            days = SILENT_REPO_CHECK_FRESHNESS_DAYS
+        row = self.conn.execute(
+            """
+            SELECT 1 FROM repositories
+            WHERE id = ?
+              AND last_checked_at IS NOT NULL
+              AND last_checked_at >= datetime('now', ?)
+            """,
+            (repo_id, f"-{days} days"),
+        ).fetchone()
+        return row is not None
+
+    def mark_repo_checked(self, repo_id):
+        """Stamp `last_checked_at = now` for a single repo.
+
+        Called by silent mode after a repo has been processed
+        (languages/topics saved or determined to be unchanged) so the
+        per-repo TTL window starts fresh.  Must only be called after
+        a successful round-trip — calling it on a rate-limited path
+        would postpone the real fetch by the whole TTL window.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE repositories SET last_checked_at = ? WHERE id = ?",
+            (now, repo_id),
+        )
+        self.conn.commit()
 
     # --------------------------------------------------
     # Followers count (incremental scan detection)

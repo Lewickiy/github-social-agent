@@ -80,8 +80,8 @@ LOG_FILE = "github_social.log"
 # =====================================================
 
 SILENT_DELAY_BETWEEN_USERS = 2  # pause between users (2 min)
-SILENT_DELAY_BETWEEN_REPOS = 2  # pause between repos of one user
-SILENT_DELAY_BETWEEN_REQUESTS = 1  # pause between API calls within a repo
+SILENT_DELAY_BETWEEN_REPOS = 5  # pause between repos of one user (was 2; throttled to avoid /languages abuse)
+SILENT_DELAY_BETWEEN_REQUESTS = 3  # pause between API calls within a repo (was 1; throttled to avoid rate-limit)
 SILENT_DELAY_BETWEEN_SCORES = 1  # pause between scoring users
 SILENT_DELAY_BETWEEN_FOLLOWS = 2  # pause between follow actions in silent mode
 
@@ -107,7 +107,25 @@ CURRENT_SCORE_VERSION = 4
 # OPTIMIZATION — TTL / FRESHNESS (days)
 # =====================================================
 
-REPO_FRESHNESS_DAYS = 7       # skip repo fetch if collected within this period
+REPO_FRESHNESS_DAYS = 7       # skip repo fetch if collected within this period (user-level)
 OWNER_SYNC_DAYS = 14          # re-sync owner repos/langs at most this often
 SCORE_FRESHNESS_DAYS = 20     # skip scoring if scored within this period
 FOLLOWER_SCAN_DAYS = 5        # re-scan follower graph at most this often
+
+# Silent mode — per-repo TTL for the /languages API call.
+# A repo whose `last_checked_at` is within this window is skipped
+# (no /repos/{owner}/{repo}/languages request).
+SILENT_REPO_CHECK_FRESHNESS_DAYS = 5
+
+# ── Heavy / fork language-fetch gate ─────────────────────────────────────
+# When `READ_HEAVY_FORK_LANGUAGES` is False (default) the bot does NOT
+# call /repos/{owner}/{repo}/languages for:
+#   • any repo larger than `SKIP_LANGS_MAX_SIZE_KB`, or
+#   • any fork larger than `SKIP_LANGS_FORK_SIZE_KB`.
+# This protects against GitHub's secondary rate limit (abuse detection)
+# which is most easily tripped by /languages on heavy forks (DeepFaceLive,
+# Ryujinx, etc.).  Flip the flag to True to revert to the old
+# unconditional behaviour.
+READ_HEAVY_FORK_LANGUAGES = False
+SKIP_LANGS_MAX_SIZE_KB = 500_000   # 500 MB
+SKIP_LANGS_FORK_SIZE_KB = 50_000    # 50 MB

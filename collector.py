@@ -15,15 +15,28 @@ exits cleanly.
 import threading
 import time
 
-from config import MY_USERNAME, OWNER_SYNC_DAYS
-from github_client import GitHubRateLimitError
+from config import (
+    MY_USERNAME,
+    OWNER_SYNC_DAYS,
+    READ_HEAVY_FORK_LANGUAGES,
+    SKIP_LANGS_FORK_SIZE_KB,
+    SKIP_LANGS_MAX_SIZE_KB,
+)
+from github_client import (
+    GitHubAuthError,
+    GitHubRateLimitError,
+    LONG_HINT_THRESHOLD,
+    first_wait_from_headers,
+    should_fetch_languages,
+)
 from logger import get_logger
 
 log = get_logger(__name__)
 
-# Retry schedule: 3 attempts with delays of 5, 10, 15 minutes
-_RETRY_DELAYS = [5 * 60, 10 * 60, 15 * 60]   # seconds
-_COOLDOWN_DELAY = 2 * 60 * 60                  # 2 hours
+# Cooldown after a failed retry cycle.  LONG_HINT_THRESHOLD (skip-to-cooldown
+# cutoff when Retry-After is huge) and FALLBACK_RETRY_DELAYS (no-header
+# schedule used as fallback_seconds) are imported from github_client above.
+_COOLDOWN_DELAY = 1 * 60 * 60                  # 1 hour
 
 
 class Collector:
@@ -57,7 +70,7 @@ class Collector:
             if self._shutdown.is_set():
                 return False
             remaining = deadline - time.monotonic()
-            time.sleep(min(1.0, remaining))
+            time.sleep(max(0.0, min(1.0, remaining)))
         return not self._shutdown.is_set()
 
     # ------------------------------------------------------------------
@@ -65,40 +78,87 @@ class Collector:
     # ------------------------------------------------------------------
 
     def _handle_rate_limit(self, exc):
-        """Run the 3-retry + 2-hour-cooldown cycle.
+        """Run the 3-retry + 1-hour-cooldown cycle.
+
+        First delay is derived from the GitHub ``Retry-After`` /
+        ``X-RateLimit-Reset`` header attached to *exc*.  If the server
+        hint exceeds ``LONG_HINT_THRESHOLD`` (e.g. a 1-hour secondary
+        ban), we skip the retry loop and go straight to cooldown to
+        avoid pointless hammering.
 
         Returns
         -------
         "shutdown"
             Graceful shutdown was requested during the wait.
         "cooldown_done"
-            The 2-hour cooldown finished — caller should retry.
+            The 1-hour cooldown finished — caller should retry.
         """
-        # --- 3 retries with 5 / 10 / 15-minute delays ---
-        for attempt, delay in enumerate(_RETRY_DELAYS, 1):
+        first_wait = first_wait_from_headers(exc, fallback_seconds=FALLBACK_RETRY_DELAYS[0])
+
+        # Shortcut: if GitHub told us to wait longer than the cooldown,
+        # burning 3 retries will just hammer the limit again.  Skip them.
+        if first_wait >= LONG_HINT_THRESHOLD:
             log.warning(
-                "Retry %d/3 — waiting %d minutes (HTTP %s on %s)",
-                attempt, delay // 60, exc.status_code, exc.url,
+                "Retry-After=%ds exceeds %ds — bypassing retry loop, cooling down.",
+                first_wait, COOLDOWN_DELAY,
             )
             print(
-                f"  ↻ Retry {attempt}/3 in {delay // 60} minutes "
+                f"  ⏭  Retry-After {first_wait}s ≥ cooldown; skipping retries."
+            )
+            if not self._sleep(_COOLDOWN_DELAY):
+                return "shutdown"
+            print("  ▶ Cooldown finished — resuming collection.\n")
+            return "cooldown_done"
+
+        # Exponential backoff (matches SilentRunner._handle_rate_limit).
+        delays = [
+            first_wait,
+            min(first_wait * 2, 15 * 60),
+            min(first_wait * 4, 15 * 60),
+        ]
+        for attempt, delay in enumerate(delays, 1):
+            log.warning(
+                "Retry %d/3 — waiting %ds (HTTP %s on %s, verdict=%s)",
+                attempt, int(delay), exc.status_code, exc.url,
+                getattr(exc, "verdict", "unknown"),
+            )
+            print(
+                f"  ↻ Retry {attempt}/3 waiting {int(delay)}s "
                 f"(status {exc.status_code}) ..."
             )
             if not self._sleep(delay):
                 return "shutdown"
 
-        # --- 2-hour cooldown ---
+        # --- 1-hour cooldown ---
         log.warning(
-            "All 3 retries exhausted for %s — cooling down for 2 hours",
+            "All 3 retries exhausted for %s — cooling down for 1 hour",
             exc.url,
         )
-        print("  ⏳ All retries exhausted. Cooling down for 2 hours ...")
+        print("  ⏳ All retries exhausted. Cooling down for 1 hour ...")
         if not self._sleep(_COOLDOWN_DELAY):
             return "shutdown"
 
-        log.info("2-hour cooldown finished — resuming collection.")
+        log.info("1-hour cooldown finished — resuming collection.")
         print("  ▶ Cooldown finished — resuming collection.\n")
         return "cooldown_done"
+
+    # ------------------------------------------------------------------
+    # Auth error (fatal — token invalid/expired)
+    # ------------------------------------------------------------------
+
+    def _abort_on_auth_error(self, exc):
+        """Log a fatal message and signal graceful shutdown.
+
+        Mirrors SilentRunner._abort_on_auth_error — a 401 from GitHub
+        means the token is no longer valid, so retrying is pointless.
+        """
+        log.error(
+            "AUTH FAILURE (%s) on %s — token revoked/expired. Aborting run.",
+            exc.status_code, exc.url,
+        )
+        print("\n❌ AUTH FAILURE — GitHub rejected the token (revoked/expired).")
+        print("   Refresh GITHUB_TOKEN in your .env and restart.\n")
+        self._shutdown.set()
 
     # ------------------------------------------------------------------
     # Owner profile sync (TTL-based)
@@ -158,11 +218,17 @@ class Collector:
 
         try:
             people = self.github.followers(owner)
+        except GitHubAuthError as exc:
+            self._abort_on_auth_error(exc)
+            return []
         except GitHubRateLimitError as exc:
             log.warning("Rate limit (%s) fetching owner followers", exc.status_code)
             if verbose:
                 print(f"  ⚠ Rate limit ({exc.status_code}) — skipping owner follower check")
             return []
+
+
+
 
         added = 0
         followbacks = 0
@@ -235,6 +301,9 @@ class Collector:
             # ── Fetch current follower count (1 API call) ──
             try:
                 info = self.github.user(username)
+            except GitHubAuthError as exc:
+                self._abort_on_auth_error(exc)
+                return
             except GitHubRateLimitError as exc:
                 log.warning("Rate limit (%s) on user %s", exc.status_code, username)
                 print(f"\n  ⚠ Rate limit ({exc.status_code}) on {username}")
@@ -266,6 +335,9 @@ class Collector:
 
             try:
                 followers = self.github.followers(username)
+            except GitHubAuthError as exc:
+                self._abort_on_auth_error(exc)
+                return
             except GitHubRateLimitError as exc:
                 log.warning("Rate limit (%s) on followers of %s", exc.status_code, username)
                 print(f"\n  ⚠ Rate limit ({exc.status_code}) on followers of {username}")
@@ -359,6 +431,9 @@ class Collector:
             # ── Check user exists on GitHub ──
             try:
                 info = self.github.user(username)
+            except GitHubAuthError as exc:
+                self._abort_on_auth_error(exc)
+                return
             except GitHubRateLimitError as exc:
                 log.warning(
                     "Rate limit (%s) checking user %s",
@@ -387,6 +462,9 @@ class Collector:
             # ── Fetch repos ──
             try:
                 repos = self.github.repos(username)
+            except GitHubAuthError as exc:
+                self._abort_on_auth_error(exc)
+                return
             except GitHubRateLimitError as exc:
                 log.warning(
                     "Rate limit (%s) fetching repos for %s — entering retry cycle",
@@ -405,24 +483,45 @@ class Collector:
 
                 repo_id, _ = self.db.save_repository(username, repo)
 
-                try:
-                    langs = self.github.repo_languages(username, repo["name"])
-                except GitHubRateLimitError as exc:
-                    log.warning(
-                        "Rate limit (%s) fetching languages for %s/%s",
-                        exc.status_code, username, repo["name"],
-                    )
-                    print(f"\n  ⚠ Rate limit ({exc.status_code}) on languages for {username}/{repo['name']}")
-                    result = self._handle_rate_limit(exc)
-                    if result == "shutdown":
+                # Heavy / fork filter — skip /languages for heavyweight
+                # repos / large forks (avoids secondary-rate-limit triggers).
+                _should_lang = should_fetch_languages(
+                    repo,
+                    fork_threshold_kb=SKIP_LANGS_FORK_SIZE_KB,
+                    max_threshold_kb=SKIP_LANGS_MAX_SIZE_KB,
+                    read_heavy_forks=READ_HEAVY_FORK_LANGUAGES,
+                )
+
+                if _should_lang:
+                    try:
+                        langs = self.github.repo_languages(username, repo["name"])
+                    except GitHubAuthError as exc:
+                        self._abort_on_auth_error(exc)
                         return
-                    # Rate limit on languages — skip remaining languages for
-                    # this user but keep the already-saved repos.
-                    break
+                    except GitHubRateLimitError as exc:
+                        log.warning(
+                            "Rate limit (%s) fetching languages for %s/%s",
+                            exc.status_code, username, repo["name"],
+                        )
+                        print(f"\n  ⚠ Rate limit ({exc.status_code}) on languages for {username}/{repo['name']}")
+                        result = self._handle_rate_limit(exc)
+                        if result == "shutdown":
+                            return
+                        # Rate limit on languages — skip remaining languages for
+                        # this user but keep the already-saved repos.
+                        break
 
-                if langs:
-                    self.db.save_repository_languages(repo_id, langs)
+                    if langs:
+                        self.db.save_repository_languages(repo_id, langs)
+                else:
+                    log.debug(
+                        "Collector: %s/%s heavy/fork — no /languages call "
+                        "(size=%sKB, fork=%s)",
+                        username, repo["name"],
+                        repo.get("size", 0), repo.get("fork", False),
+                    )
 
+                # Topics — always processed (free, comes from /users/.../repos)
                 topics = repo.get("topics", [])
                 if topics:
                     self.db.save_repository_topics(repo_id, topics)
