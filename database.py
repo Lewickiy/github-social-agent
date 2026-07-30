@@ -132,7 +132,7 @@ class Database:
         ).fetchall()
         return rows
 
-    def users_for_silent_processing(self):
+    def users_for_silent_processing(self, prioritize_small=False):
         """Return users eligible for silent-mode collection + scoring.
 
         Excludes:
@@ -144,10 +144,13 @@ class Database:
 
         Ordered by:
           1. Owner followers (discovered_from = 'owner_followers') — priority,
-          2. Then by followers DESC (popular users first).
+          2. Then by followers ASC/DESC depending on *prioritize_small*.
+             False (default) = popular first (richer data, better scoring);
+             True              = small accounts first (more follow-backs).
         """
+        direction = "ASC" if prioritize_small else "DESC"
         rows = self.conn.execute(
-            """
+            f"""
             SELECT u.username
             FROM users u
             WHERE u.owner = 0
@@ -163,7 +166,7 @@ class Database:
               )
             ORDER BY
                 CASE WHEN u.discovered_from = 'owner_followers' THEN 0 ELSE 1 END,
-                u.followers DESC
+                u.followers {direction}
             """,
             (
                 f"-{REPO_FRESHNESS_DAYS} days",

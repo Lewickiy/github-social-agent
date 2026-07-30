@@ -112,6 +112,11 @@ OWNER_SYNC_DAYS = 14          # re-sync owner repos/langs at most this often
 SCORE_FRESHNESS_DAYS = 20     # skip scoring if scored within this period
 FOLLOWER_SCAN_DAYS = 5        # re-scan follower graph at most this often
 
+# When True, process less-followed users first within each priority group
+# (maximises follow-backs — smaller accounts are more likely to reciprocate).
+# When False (default), popular users go first (richer data, better scoring).
+SILENT_PRIORITIZE_SMALL = False
+
 # Silent mode — per-repo TTL for the /languages API call.
 # A repo whose `last_checked_at` is within this window is skipped
 # (no /repos/{owner}/{repo}/languages request).

@@ -18,6 +18,7 @@ from config import (
     SILENT_DELAY_BETWEEN_SCORES,
     SILENT_DELAY_BETWEEN_FOLLOWS,
     SILENT_FOLLOW_SCORE_THRESHOLD,
+    SILENT_PRIORITIZE_SMALL,
     SILENT_REPO_CHECK_FRESHNESS_DAYS,
     SKIP_LANGS_FORK_SIZE_KB,
     SKIP_LANGS_MAX_SIZE_KB,
@@ -476,7 +477,9 @@ class SilentRunner:
             owner_topics = self.db.user_topics(owner_username)
             log.info("Owner profile loaded for scoring: %s", owner_username)
 
-        rows = self.db.users_for_silent_processing()
+        rows = self.db.users_for_silent_processing(
+            prioritize_small=SILENT_PRIORITIZE_SMALL,
+        )
 
         total = len(rows)
         print(f"Processing {total} users (silent) ...")
