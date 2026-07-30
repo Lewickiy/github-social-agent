@@ -25,6 +25,7 @@ from config import (
 from collector import Collector
 from github_client import (
     GitHubAuthError,
+    GitHubNetworkError,
     GitHubRateLimitError,
     LONG_HINT_THRESHOLD,
     first_wait_from_headers,
@@ -154,6 +155,30 @@ class SilentRunner:
         self._shutdown.set()
 
     # ------------------------------------------------------------------
+    # Network-error handling
+    # ------------------------------------------------------------------
+
+    def _handle_network_error(self, exc):
+        """3 retries for transient network errors, then skip.
+
+        Returns "shutdown" or "retry_exhausted".
+        Unlike rate limits we don't do a long cooldown — network
+        glitches are usually short-lived.
+        """
+        delays = [10, 30, 90]
+        for attempt, delay in enumerate(delays, 1):
+            log.warning(
+                "Network error (attempt %d/3) on %s: %s — waiting %ds",
+                attempt, exc.url, exc.original, delay,
+            )
+            print(f"  🌐 Network error — retry {attempt}/3 waiting {delay}s ...")
+            if not self._sleep(delay):
+                return "shutdown"
+        log.warning("Network retries exhausted for %s — skipping", exc.url)
+        print("  ⏭  Network retries exhausted — skipping.")
+        return "retry_exhausted"
+
+    # ------------------------------------------------------------------
     # Repo collection (one user at a time, stealth delays)
     # ------------------------------------------------------------------
 
@@ -182,6 +207,10 @@ class SilentRunner:
             except GitHubAuthError as exc:
                 self._abort_on_auth_error(exc)
                 return
+            except GitHubNetworkError as exc:
+                if self._handle_network_error(exc) == "shutdown":
+                    return
+                continue
             except GitHubRateLimitError as exc:
                 log.warning("Rate limit (%s) checking user %s", exc.status_code, username)
                 print(f"  ⚠ Rate limit ({exc.status_code})")
@@ -205,6 +234,10 @@ class SilentRunner:
             except GitHubAuthError as exc:
                 self._abort_on_auth_error(exc)
                 return
+            except GitHubNetworkError as exc:
+                if self._handle_network_error(exc) == "shutdown":
+                    return
+                continue
             except GitHubRateLimitError as exc:
                 log.warning("Rate limit (%s) on repos for %s", exc.status_code, username)
                 print(f"  ⚠ Rate limit ({exc.status_code})")
@@ -259,6 +292,10 @@ class SilentRunner:
                     except GitHubAuthError as exc:
                         self._abort_on_auth_error(exc)
                         return
+                    except GitHubNetworkError as exc:
+                        if self._handle_network_error(exc) == "shutdown":
+                            return
+                        break
                     except GitHubRateLimitError as exc:
                         log.warning("Rate limit (%s) on langs %s/%s", exc.status_code, username, repo_name)
                         print(f"  ⚠ Rate limit ({exc.status_code})")
@@ -334,6 +371,18 @@ class SilentRunner:
                 # the outer run() loop will exit cleanly on the next tick.
                 self._abort_on_auth_error(exc)
                 return None
+            except GitHubNetworkError as exc:
+                log.warning("Network error (%s) fetching user %s for scoring", exc, username)
+                print(f"  🌐 Network error fetching {username}")
+                if self._handle_network_error(exc) == "shutdown":
+                    return None
+                # One more try after retries exhausted
+                try:
+                    info = self.github.user(username)
+                except Exception:
+                    log.warning("Still failing to fetch %s after network retries", username)
+                    print(f"    ⚠ Cannot fetch profile for {username} — skipping score")
+                    return None
             except GitHubRateLimitError as exc:
                 log.warning("Rate limit (%s) fetching user %s", exc.status_code, username)
                 print(f"  ⚠ Rate limit ({exc.status_code})")
@@ -378,19 +427,29 @@ class SilentRunner:
             print(f"    ⛔ Daily follow limit reached ({done_today}/{DAILY_FOLLOW_LIMIT})")
             return False
 
-        if self.github.already_following(username):
-            log.debug("Already following %s — skipped", username)
-            print(f"    👤 Already following {username}")
+        try:
+            if self.github.already_following(username):
+                log.debug("Already following %s — skipped", username)
+                print(f"    👤 Already following {username}")
+                return False
+        except GitHubNetworkError as exc:
+            log.warning("Network error checking follow for %s: %s — skipping", username, exc)
+            print(f"    🌐 Network error checking {username} — skipping follow")
             return False
 
-        if self.github.follow(username):
-            self.db.mark_followed(username)
-            log.info("Followed %s (score %d)", username, score)
-            print(f"    🤝 Followed {username} (score {score}) [{done_today + 1}/{DAILY_FOLLOW_LIMIT}]")
-            return True
-        else:
-            log.warning("Failed to follow %s", username)
-            print(f"    ❌ Failed to follow {username}")
+        try:
+            if self.github.follow(username):
+                self.db.mark_followed(username)
+                log.info("Followed %s (score %d)", username, score)
+                print(f"    🤝 Followed {username} (score {score}) [{done_today + 1}/{DAILY_FOLLOW_LIMIT}]")
+                return True
+            else:
+                log.warning("Failed to follow %s", username)
+                print(f"    ❌ Failed to follow {username}")
+                return False
+        except GitHubNetworkError as exc:
+            log.warning("Network error following %s: %s — skipping", username, exc)
+            print(f"    🌐 Network error following {username} — skipping")
             return False
 
     # ------------------------------------------------------------------

@@ -189,6 +189,10 @@ Usage:
     python main.py --migrate-status    Show migration status\
 """
             )
+    except Exception as exc:
+        log.critical("Unhandled exception — %s: %s", type(exc).__name__, exc, exc_info=True)
+        print(f"\n❌ Unexpected error: {exc}")
+        print("   Shutting down gracefully...")
     finally:
         log.info("Shutting down — committing and closing database.")
         db.conn.commit()

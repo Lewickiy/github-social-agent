@@ -71,9 +71,9 @@ DAILY_FOLLOW_LIMIT = 50
 
 FOLLOW_DELAY = 60
 
-DATABASE = "github_social.db"
+DATABASE = os.getenv("DATABASE", "github_social.db")
 
-LOG_FILE = "github_social.log"
+LOG_FILE = os.getenv("LOG_FILE", "github_social.log")
 
 # =====================================================
 # SILENT MODE — human-like intervals (seconds)

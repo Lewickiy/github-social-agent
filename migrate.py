@@ -90,6 +90,9 @@ def migrate(path=None):
     conn = sqlite3.connect(path or DATABASE)
     _ensure_migrations_table(conn)
 
+    # Включаем WAL-режим для параллельного доступа (Docker + DBeaver)
+    conn.execute("PRAGMA journal_mode=WAL;")
+
     applied = _applied_names(conn)
     files = _migration_files()
 

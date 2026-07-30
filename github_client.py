@@ -116,6 +116,20 @@ def should_fetch_languages(repo,
 # ── Exceptions ────────────────────────────────────────────────────────────
 
 
+class GitHubNetworkError(Exception):
+    """Raised on transport-level errors (timeout, connection reset, DNS, etc.).
+
+    These are transient — unlike auth errors, they should be retried
+    with back-off rather than aborting the run.
+    Carries the original exception for logging context.
+    """
+
+    def __init__(self, url, original_exception=None):
+        self.url = url
+        self.original = original_exception
+        super().__init__(f"Network error for {url}: {original_exception}")
+
+
 class GitHubAuthError(Exception):
     """Raised on HTTP 401 — token revoked/expired.  Retrying won't help.
 
@@ -166,12 +180,16 @@ class GithubClient:
     def request(self, method, url, **kwargs):
         kwargs.setdefault("timeout", _REQUEST_TIMEOUT)
 
-        r = requests.request(
-            method,
-            API + url,
-            headers=HEADERS,
-            **kwargs,
-        )
+        try:
+            r = requests.request(
+                method,
+                API + url,
+                headers=HEADERS,
+                **kwargs,
+            )
+        except requests.exceptions.RequestException as e:
+            log.warning("Network error on %s %s: %s", method, url, e)
+            raise GitHubNetworkError(url, original_exception=e) from e
 
         # ── 401 → fatal auth error (don't retry) ──
         if r.status_code == 401:
@@ -259,21 +277,33 @@ class GithubClient:
 
     def follow(self, username):
         """Follow *username*. Returns True on success."""
-        r = requests.put(
-            f"{API}/user/following/{username}",
-            headers=HEADERS,
-            timeout=_REQUEST_TIMEOUT,
-        )
-        return r.status_code == 204
+        try:
+            r = requests.put(
+                f"{API}/user/following/{username}",
+                headers=HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            return r.status_code == 204
+        except requests.exceptions.RequestException as e:
+            log.warning("Network error following %s: %s", username, e)
+            raise GitHubNetworkError(
+                f"/user/following/{username}", original_exception=e
+            ) from e
 
     def already_following(self, username):
         """Check whether we already follow *username*."""
-        r = requests.get(
-            f"{API}/user/following/{username}",
-            headers=HEADERS,
-            timeout=_REQUEST_TIMEOUT,
-        )
-        return r.status_code == 204
+        try:
+            r = requests.get(
+                f"{API}/user/following/{username}",
+                headers=HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            return r.status_code == 204
+        except requests.exceptions.RequestException as e:
+            log.warning("Network error checking follow for %s: %s", username, e)
+            raise GitHubNetworkError(
+                f"/user/following/{username}", original_exception=e
+            ) from e
 
     # --------------------------------------------------
     # Repositories & languages

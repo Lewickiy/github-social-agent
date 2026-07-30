@@ -23,7 +23,9 @@ from config import (
     SKIP_LANGS_MAX_SIZE_KB,
 )
 from github_client import (
+    FALLBACK_RETRY_DELAYS,
     GitHubAuthError,
+    GitHubNetworkError,
     GitHubRateLimitError,
     LONG_HINT_THRESHOLD,
     first_wait_from_headers,
@@ -161,6 +163,30 @@ class Collector:
         self._shutdown.set()
 
     # ------------------------------------------------------------------
+    # Network-error handling
+    # ------------------------------------------------------------------
+
+    def _handle_network_error(self, exc):
+        """3 retries for transient network errors, then skip.
+
+        Returns "shutdown" or "retry_exhausted".
+        Unlike rate limits we don't do a long cooldown — network
+        glitches are usually short-lived.
+        """
+        delays = [10, 30, 90]
+        for attempt, delay in enumerate(delays, 1):
+            log.warning(
+                "Network error (attempt %d/3) on %s: %s — waiting %ds",
+                attempt, exc.url, exc.original, delay,
+            )
+            print(f"  🌐 Network error — retry {attempt}/3 waiting {delay}s ...")
+            if not self._sleep(delay):
+                return "shutdown"
+        log.warning("Network retries exhausted for %s — skipping", exc.url)
+        print("  ⏭  Network retries exhausted — skipping.")
+        return "retry_exhausted"
+
+    # ------------------------------------------------------------------
     # Owner profile sync (TTL-based)
     # ------------------------------------------------------------------
 
@@ -220,6 +246,11 @@ class Collector:
             people = self.github.followers(owner)
         except GitHubAuthError as exc:
             self._abort_on_auth_error(exc)
+            return []
+        except GitHubNetworkError as exc:
+            log.warning("Network error fetching owner followers: %s", exc)
+            if verbose:
+                print(f"  🌐 Network error — skipping owner follower check")
             return []
         except GitHubRateLimitError as exc:
             log.warning("Rate limit (%s) fetching owner followers", exc.status_code)
@@ -304,6 +335,11 @@ class Collector:
             except GitHubAuthError as exc:
                 self._abort_on_auth_error(exc)
                 return
+            except GitHubNetworkError as exc:
+                result = self._handle_network_error(exc)
+                if result == "shutdown":
+                    return
+                continue
             except GitHubRateLimitError as exc:
                 log.warning("Rate limit (%s) on user %s", exc.status_code, username)
                 print(f"\n  ⚠ Rate limit ({exc.status_code}) on {username}")
@@ -338,6 +374,11 @@ class Collector:
             except GitHubAuthError as exc:
                 self._abort_on_auth_error(exc)
                 return
+            except GitHubNetworkError as exc:
+                result = self._handle_network_error(exc)
+                if result == "shutdown":
+                    return
+                continue
             except GitHubRateLimitError as exc:
                 log.warning("Rate limit (%s) on followers of %s", exc.status_code, username)
                 print(f"\n  ⚠ Rate limit ({exc.status_code}) on followers of {username}")
@@ -434,6 +475,11 @@ class Collector:
             except GitHubAuthError as exc:
                 self._abort_on_auth_error(exc)
                 return
+            except GitHubNetworkError as exc:
+                result = self._handle_network_error(exc)
+                if result == "shutdown":
+                    return
+                continue
             except GitHubRateLimitError as exc:
                 log.warning(
                     "Rate limit (%s) checking user %s",
@@ -465,6 +511,11 @@ class Collector:
             except GitHubAuthError as exc:
                 self._abort_on_auth_error(exc)
                 return
+            except GitHubNetworkError as exc:
+                result = self._handle_network_error(exc)
+                if result == "shutdown":
+                    return
+                continue
             except GitHubRateLimitError as exc:
                 log.warning(
                     "Rate limit (%s) fetching repos for %s — entering retry cycle",
@@ -498,6 +549,11 @@ class Collector:
                     except GitHubAuthError as exc:
                         self._abort_on_auth_error(exc)
                         return
+                    except GitHubNetworkError as exc:
+                        result = self._handle_network_error(exc)
+                        if result == "shutdown":
+                            return
+                        break
                     except GitHubRateLimitError as exc:
                         log.warning(
                             "Rate limit (%s) fetching languages for %s/%s",
