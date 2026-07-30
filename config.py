@@ -79,8 +79,8 @@ LOG_FILE = "github_social.log"
 # SILENT MODE — human-like intervals (seconds)
 # =====================================================
 
-SILENT_DELAY_BETWEEN_USERS = 2  # pause between users (2 min)
-SILENT_DELAY_BETWEEN_REPOS = 5  # pause between repos of one user (was 2; throttled to avoid /languages abuse)
+SILENT_DELAY_BETWEEN_USERS = 1  # pause between users (2 min)
+SILENT_DELAY_BETWEEN_REPOS = 2  # pause between repos of one user (was 2; throttled to avoid /languages abuse)
 SILENT_DELAY_BETWEEN_REQUESTS = 3  # pause between API calls within a repo (was 1; throttled to avoid rate-limit)
 SILENT_DELAY_BETWEEN_SCORES = 1  # pause between scoring users
 SILENT_DELAY_BETWEEN_FOLLOWS = 2  # pause between follow actions in silent mode

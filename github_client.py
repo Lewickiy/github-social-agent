@@ -40,6 +40,8 @@ def classify_limit(exc):
 
     Primary exhaustion: standard headers + Remaining=0 + no Retry-After.
     Secondary limit: usually carries Retry-After and lacks X-RateLimit-* .
+    Resource denial: 403 with Remaining>0 and no Retry-After — not a rate
+    limit at all, just GitHub refusing that specific endpoint/resource.
     """
     if getattr(exc, "retry_after", None) is not None:
         return "secondary (abuse)"
@@ -84,6 +86,7 @@ def should_fetch_languages(repo,
 
     Falls back to True when ``read_heavy_forks`` is True (legacy mode).
     Otherwise:
+      - any empty repo (size 0 KB)              → False
       - any repo larger than ``max_threshold_kb``  → False
       - any fork larger than ``fork_threshold_kb``  → False
       - everything else                            → True
@@ -98,6 +101,10 @@ def should_fetch_languages(repo,
 
     size_kb = repo.get("size", 0) or 0
     is_fork = bool(repo.get("fork", False))
+
+    # Empty repos have no content — GitHub always returns 403 for /languages
+    if size_kb == 0:
+        return False
 
     if size_kb > max_threshold_kb:
         return False
@@ -142,9 +149,10 @@ class GitHubRateLimitError(Exception):
         # Provisional verdict — derived in classify_limit() so callers can
         # log/branch on it without needing to know header semantics.
         self.verdict = classify_limit(self)
+        retry_str = f"{retry_after}s" if retry_after is not None else "None"
         super().__init__(
             f"GitHub {status_code} for {url} ({self.verdict}; "
-            f"Retry-After={retry_after}s Reset={reset_at} Remaining={remaining})"
+            f"Retry-After={retry_str} Reset={reset_at} Remaining={remaining})"
         )
 
 
@@ -179,15 +187,32 @@ class GithubClient:
             reset_at = _parse_int(r.headers.get("X-RateLimit-Reset"))
             remaining = _parse_int(r.headers.get("X-RateLimit-Remaining"))
 
+            # 403 with remaining > 0 and no Retry-After is NOT a rate limit —
+            # GitHub is simply refusing this specific resource (e.g. /languages
+            # on a repo too large to compute).  Retrying is pointless.
+            if (
+                r.status_code == 403
+                and remaining is not None
+                and remaining > 0
+                and retry_after is None
+            ):
+                log.warning(
+                    "GitHub 403 (resource denied) for %s — "
+                    "Remaining=%s, not a rate limit; skipping.",
+                    url, remaining,
+                )
+                return None
+
             exc = GitHubRateLimitError(
                 r.status_code, url, r,
                 retry_after=retry_after,
                 reset_at=reset_at,
                 remaining=remaining,
             )
+            retry_str = f"{retry_after}s" if retry_after is not None else "None"
             log.warning(
-                "%s — Retry-After=%ss Reset=%s Remaining=%s",
-                exc, retry_after, reset_at, remaining,
+                "%s — Retry-After=%s Reset=%s Remaining=%s",
+                exc, retry_str, reset_at, remaining,
             )
             raise exc
 
