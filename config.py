@@ -71,7 +71,7 @@ DAILY_FOLLOW_LIMIT = 50
 
 FOLLOW_DELAY = 60
 
-DATABASE = os.getenv("DATABASE", "github_social.db")
+DATABASE = os.getenv("DATABASE", "data/github_social.db")
 
 LOG_FILE = os.getenv("LOG_FILE", "github_social.log")
 
@@ -112,6 +112,10 @@ OWNER_SYNC_DAYS = 14          # re-sync owner repos/langs at most this often
 SCORE_FRESHNESS_DAYS = 20     # skip scoring if scored within this period
 FOLLOWER_SCAN_DAYS = 5        # re-scan follower graph at most this often
 
+# How often (hours) the background worker re-checks FOLLOWBACK users
+# to detect those who unfollowed us after a mutual follow.
+FOLLOWBACK_CHECK_INTERVAL_HOURS = 1
+
 # When True, process less-followed users first within each priority group
 # (maximises follow-backs — smaller accounts are more likely to reciprocate).
 # When False (default), popular users go first (richer data, better scoring).
@@ -121,6 +125,17 @@ SILENT_PRIORITIZE_SMALL = False
 # A repo whose `last_checked_at` is within this window is skipped
 # (no /repos/{owner}/{repo}/languages request).
 SILENT_REPO_CHECK_FRESHNESS_DAYS = 5
+
+# =====================================================
+# ML — нейронная сеть для прогнозирования FOLLOWBACK
+# =====================================================
+
+ML_ENABLED = True                  # enable ML inference
+ML_TRAIN_AFTER_START = True        # train immediately after worker starts
+ML_TRAIN_INTERVAL_HOURS = 24       # re-train every N hours
+ML_MODEL_DIR = "models"            # directory for saved model files
+ML_TOP_LANGUAGES = 30              # top-N languages for multi-hot encoding
+ML_TOP_TOPICS = 50                 # top-N topics for multi-hot encoding
 
 # ── Heavy / fork language-fetch gate ─────────────────────────────────────
 # When `READ_HEAVY_FORK_LANGUAGES` is False (default) the bot does NOT

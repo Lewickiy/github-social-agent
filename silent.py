@@ -7,9 +7,11 @@ All delays are configurable in config.py (SILENT_* settings).
 import random
 import threading
 import time
+from datetime import datetime, timezone
 
 from config import (
     DAILY_FOLLOW_LIMIT,
+    ML_ENABLED,
     OWNER_FOLLOWER_SCAN_INTERVAL,
     READ_HEAVY_FORK_LANGUAGES,
     SILENT_DELAY_BETWEEN_USERS,
@@ -229,6 +231,9 @@ class SilentRunner:
                 print(f"  👻 {username} — deleted, skipped")
                 return
 
+            # ── Store full profile for ML ──
+            self.db.store_full_profile(username, info)
+
             # ── Fetch repos ──
             try:
                 repos = self.github.repos(username)
@@ -352,12 +357,18 @@ class SilentRunner:
     # Scoring (one user at a time)
     # ------------------------------------------------------------------
 
-    def _score_user(self, username, owner_langs=None, owner_topics=None):
+    def _score_user(self, username, owner_langs=None, owner_topics=None,
+                    ml_model=None, ml_meta=None):
         """Score a single user with optional owner similarity data.
 
         Uses cached profile info when available to avoid API calls.
+        Stores the full profile JSON only when fetched from the API.
+        Runs ML inference when *ml_model* and *ml_meta* are provided.
+
         Returns the score (int) on success, or None on failure.
         """
+        fetched_from_api = False
+
         # ── Try cached info first ──
         info = self.db.get_user_cached_info(username)
 
@@ -367,9 +378,8 @@ class SilentRunner:
             # Cache miss — fetch from API
             try:
                 info = self.github.user(username)
+                fetched_from_api = True
             except GitHubAuthError as exc:
-                # Non-recoverable — abort already set the shutdown event,
-                # the outer run() loop will exit cleanly on the next tick.
                 self._abort_on_auth_error(exc)
                 return None
             except GitHubNetworkError as exc:
@@ -377,9 +387,9 @@ class SilentRunner:
                 print(f"  🌐 Network error fetching {username}")
                 if self._handle_network_error(exc) == "shutdown":
                     return None
-                # One more try after retries exhausted
                 try:
                     info = self.github.user(username)
+                    fetched_from_api = True
                 except Exception:
                     log.warning("Still failing to fetch %s after network retries", username)
                     print(f"    ⚠ Cannot fetch profile for {username} — skipping score")
@@ -390,11 +400,16 @@ class SilentRunner:
                 if self._handle_rate_limit(exc) == "shutdown":
                     return None
                 info = self.github.user(username)
+                fetched_from_api = True
 
             if not info:
                 log.warning("No profile data for %s", username)
                 print(f"    ⚠ No profile data for {username}")
                 return None
+
+        # ── Store full profile for ML (only when freshly fetched) ──
+        if fetched_from_api:
+            self.db.store_full_profile(username, info)
 
         # ── Parse @-mentions from company field ──
         company_text = info.get("company")
@@ -413,6 +428,19 @@ class SilentRunner:
         )
         self.db.update_score(username, score, info)
         print(f"    ✅ Score: {score}")
+
+        # ── ML inference (model loaded once in run()) ──
+        if ml_model is not None and ml_meta is not None:
+            try:
+                from ml_service.inference import predict_single
+                ml_pred = predict_single(ml_model, ml_meta, self.db, username)
+                if ml_pred is not None:
+                    label = "👍" if ml_pred == 1 else "👎"
+                    print(f"    🤖 ML: {label} (followback {'likely' if ml_pred == 1 else 'unlikely'})")
+                    log.debug("ML prediction for %s: %d", username, ml_pred)
+            except Exception:
+                log.exception("ML inference error for %s", username)
+
         return score
 
     # ------------------------------------------------------------------
@@ -430,7 +458,16 @@ class SilentRunner:
 
         try:
             if self.github.already_following(username):
-                log.debug("Already following %s — skipped", username)
+                # Mark as FOLLOWED so they don't stay in the queue forever.
+                now = datetime.now(timezone.utc).isoformat()
+                self.db.conn.execute(
+                    """UPDATE users
+                       SET status = 'FOLLOWED', followed_at = ?
+                       WHERE username = ?""",
+                    (now, username),
+                )
+                self.db.conn.commit()
+                log.debug("Already following %s — marked FOLLOWED", username)
                 print(f"    👤 Already following {username}")
                 return False
         except GitHubNetworkError as exc:
@@ -452,6 +489,34 @@ class SilentRunner:
             log.warning("Network error following %s: %s — skipping", username, exc)
             print(f"    🌐 Network error following {username} — skipping")
             return False
+
+    # ------------------------------------------------------------------
+    # Follow queue drain (FIFO)
+    # ------------------------------------------------------------------
+
+    def _drain_follow_queue(self):
+        """Follow queued users (FIFO) while daily limit allows.
+
+        Picks the earliest ``NEW`` user whose score meets the threshold
+        and attempts to follow them.  Loops until the queue is empty or
+        the daily limit is exhausted.
+
+        Note: ``_follow_user`` now marks already-followed users as
+        ``FOLLOWED`` internally, so they won't be re-queued.
+        """
+        while not self._shutdown.is_set():
+            row = self.db.get_next_queued_user(SILENT_FOLLOW_SCORE_THRESHOLD)
+            if not row:
+                return  # queue empty
+
+            username, score = row
+            if self._follow_user(username, score):
+                if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
+                    return
+            else:
+                # Limit exhausted, error, or already-following (handled
+                # inside _follow_user).  Stop draining regardless.
+                return
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -485,6 +550,20 @@ class SilentRunner:
         print(f"Processing {total} users (silent) ...")
         log.info("Silent processing: %d users", total)
 
+        # ── Load ML model ONCE before the main loop ──
+        ml_model = None
+        ml_meta = None
+        if ML_ENABLED:
+            try:
+                from ml_service.inference import load_model
+                ml_model, ml_meta = load_model()
+                if ml_model is not None:
+                    log.info("ML model loaded for silent inference.")
+                else:
+                    log.debug("No ML model available — inference disabled.")
+            except Exception:
+                log.exception("Failed to load ML model")
+
         # ── Periodic owner follower scanner ──
         periodic_collector = Collector(self.db, self.github, self._shutdown)
         owner_scan_counter = 0
@@ -512,7 +591,10 @@ class SilentRunner:
                         # Process new owner follower with priority display
                         self._collect_user_repos(pu, pu_idx, len(new_followers))
                         if not self._shutdown.is_set():
-                            pu_score = self._score_user(pu, owner_langs, owner_topics)
+                            pu_score = self._score_user(
+                                pu, owner_langs, owner_topics,
+                                ml_model=ml_model, ml_meta=ml_meta,
+                            )
                             if (
                                 pu_score is not None
                                 and pu_score > SILENT_FOLLOW_SCORE_THRESHOLD
@@ -521,6 +603,9 @@ class SilentRunner:
                                 self._follow_user(pu, pu_score)
                                 if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
                                     break
+                            # Always drain queue after each owner follower
+                            # (harmless if limit exhausted — _follow_user checks)
+                            self._drain_follow_queue()
             owner_scan_counter += 1
 
             # --- Collect repos for this user (with TTL skip) ---
@@ -528,7 +613,10 @@ class SilentRunner:
 
             # --- Immediately score this user ---
             if not self._shutdown.is_set():
-                score = self._score_user(username, owner_langs, owner_topics)
+                score = self._score_user(
+                    username, owner_langs, owner_topics,
+                    ml_model=ml_model, ml_meta=ml_meta,
+                )
 
                 # --- Auto-follow if score is high enough ---
                 if (
@@ -539,9 +627,16 @@ class SilentRunner:
                     self._follow_user(username, score)
                     if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
                         break
+                # Drain queue before moving to next user (FIFO)
+                # (harmless if limit exhausted — _follow_user checks internally)
+                self._drain_follow_queue()
 
             if not self._sleep(SILENT_DELAY_BETWEEN_USERS):
                 break
+
+        # ── Final drain: follow any remaining queued users ──
+        if not self._shutdown.is_set():
+            self._drain_follow_queue()
 
         if self._shutdown.is_set():
             log.info("Silent mode interrupted by shutdown.")

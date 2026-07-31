@@ -1,3 +1,4 @@
+import json
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -60,6 +61,21 @@ class Database:
             "SELECT username FROM users WHERE owner = 1"
         ).fetchone()
         return row[0] if row else None
+
+    def store_full_profile(self, username, api_data):
+        """Cache the full GitHub API user response as JSON.
+
+        Called after every ``github.user(username)`` call so that the ML
+        feature extractor has access to all profile fields (following,
+        created_at, blog, location, email, etc.) without extra API calls.
+        """
+        if api_data is None:
+            return
+        self.conn.execute(
+            "UPDATE users SET github_profile_json = ? WHERE username = ?",
+            (json.dumps(api_data, ensure_ascii=False), username),
+        )
+        self.conn.commit()
 
     def update_score(self, username, score, info):
         self.conn.execute(
@@ -235,7 +251,8 @@ class Database:
         """Return cached user profile from the users table, or None."""
         row = self.conn.execute(
             """
-            SELECT username, public_repos, followers, bio, company, score, scored_at, status
+            SELECT username, public_repos, followers, bio, company,
+                   score, scored_at, status, github_profile_json
             FROM users WHERE username = ?
             """,
             (username,),
@@ -244,7 +261,7 @@ class Database:
         if not row:
             return None
 
-        return {
+        result = {
             "login": row[0],
             "public_repos": row[1] or 0,
             "followers": row[2] or 0,
@@ -254,6 +271,23 @@ class Database:
             "scored_at": row[6],
             "status": row[7],
         }
+
+        # If we have a cached full profile, merge the extra fields
+        if row[8]:
+            try:
+                full = json.loads(row[8])
+                # Merge fields that aren't already in the cached info
+                for key in (
+                    "following", "public_gists", "blog", "location",
+                    "email", "hireable", "name", "type",
+                    "twitter_username", "created_at",
+                ):
+                    if key in full:
+                        result[key] = full[key]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return result
 
     # --------------------------------------------------
     # Optimisation helpers — freshness / TTL
@@ -754,6 +788,54 @@ class Database:
         )
         self.conn.commit()
 
+    def get_next_queued_user(self, threshold):
+        """Return the earliest NEW user with score >= threshold (FIFO).
+
+        Ordered by ``created_at ASC`` so the user who entered the system
+        first gets followed first.  Returns ``(username, score)`` or None.
+        """
+        row = self.conn.execute(
+            """
+            SELECT username, score FROM users
+            WHERE status = 'NEW'
+              AND score >= ?
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (threshold,),
+        ).fetchone()
+        return row
+
+    def get_mutual_follow_users(self):
+        """Return usernames for all confirmed mutual-follow users (FOLLOWBACK).
+
+        These are users who followed us back after we followed them.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT username FROM users
+            WHERE status = 'FOLLOWBACK'
+            ORDER BY followed_at ASC
+            """
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def mark_unfollowed_after_mutual(self, username):
+        """Mark a user who unfollowed us after a mutual follow.
+
+        Sets status to ``UNFOLLOWED_AFTER_MUTUAL_FOLLOW``.
+        Does not overwrite ``followed_at`` (preserves original follow date).
+        """
+        self.conn.execute(
+            """
+            UPDATE users
+            SET status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'
+            WHERE username = ?
+            """,
+            (username,),
+        )
+        self.conn.commit()
+
     def get_user_companies(self, username):
         """Return list of company logins linked to *username*."""
         rows = self.conn.execute(
@@ -767,6 +849,172 @@ class Database:
             (username,),
         ).fetchall()
         return [(r[0], r[1], r[2]) for r in rows]
+
+    # --------------------------------------------------
+    # ML — training data & predictions
+    # --------------------------------------------------
+
+    def get_user_profile_json(self, username):
+        """Return the cached full GitHub API response for *username*, or None."""
+        row = self.conn.execute(
+            "SELECT github_profile_json FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def get_training_users(self):
+        """Return users for ML training with their labels.
+
+        Positive examples (label=1): users with status FOLLOWBACK.
+        Negative examples (label=0):
+          - FOLLOWED for more than 7 days (no mutual follow),
+          - UNFOLLOWED_AFTER_MUTUAL_FOLLOW.
+
+        Only includes users who have been scored and have repo data.
+
+        Returns list of (username, label).
+        """
+        rows = self.conn.execute(
+            """
+            SELECT username,
+                   CASE
+                       WHEN status = 'FOLLOWBACK' THEN 1
+                       ELSE 0
+                   END AS label
+            FROM users
+            WHERE (
+                status = 'FOLLOWBACK'
+                OR (
+                    status = 'FOLLOWED'
+                    AND followed_at IS NOT NULL
+                    AND followed_at < datetime('now', '-7 days')
+                )
+                OR status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'
+            )
+            AND score IS NOT NULL
+            AND score > 0
+            AND EXISTS (
+                SELECT 1 FROM repositories WHERE user_id = users.username
+            )
+            ORDER BY username
+            """
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def get_user_repo_aggregates(self, username):
+        """Return aggregated repository statistics for *username*.
+
+        Returns a dict with keys: repo_count, sum_stars, avg_stars,
+        max_stars, sum_forks, avg_forks, max_forks, avg_watchers,
+        archived_count, fork_count, avg_repo_age_days,
+        days_since_last_push, has_description_ratio.
+        All values are 0 if the user has no repos.
+        """
+        row = self.conn.execute(
+            """
+            SELECT
+                COUNT(*)                                                   AS repo_count,
+                COALESCE(SUM(stars), 0)                                   AS sum_stars,
+                COALESCE(AVG(stars), 0)                                   AS avg_stars,
+                COALESCE(MAX(stars), 0)                                   AS max_stars,
+                COALESCE(SUM(forks), 0)                                   AS sum_forks,
+                COALESCE(AVG(forks), 0)                                   AS avg_forks,
+                COALESCE(MAX(forks), 0)                                   AS max_forks,
+                COALESCE(AVG(watchers), 0)                                AS avg_watchers,
+                COALESCE(SUM(CASE WHEN is_archived THEN 1 ELSE 0 END), 0) AS archived_count,
+                COALESCE(SUM(CASE WHEN is_fork THEN 1 ELSE 0 END), 0)     AS fork_count,
+                COALESCE(
+                    AVG(
+                        julianday('now') - julianday(repository_created_at)
+                    ), 0
+                )                                                          AS avg_repo_age_days,
+                COALESCE(
+                    julianday('now') - julianday(MAX(repository_updated_at)),
+                    9999
+                )                                                          AS days_since_last_push,
+                COALESCE(
+                    CAST(SUM(CASE WHEN description IS NOT NULL AND description != '' THEN 1 ELSE 0 END) AS REAL)
+                    / NULLIF(COUNT(*), 0), 0
+                )                                                          AS has_description_ratio
+            FROM repositories
+            WHERE user_id = ?
+            """,
+            (username,),
+        ).fetchone()
+
+        if not row or row[0] == 0:
+            return {
+                "repo_count": 0, "sum_stars": 0, "avg_stars": 0,
+                "max_stars": 0, "sum_forks": 0, "avg_forks": 0,
+                "max_forks": 0, "avg_watchers": 0, "archived_count": 0,
+                "fork_count": 0, "avg_repo_age_days": 0,
+                "days_since_last_push": 9999, "has_description_ratio": 0,
+            }
+
+        return {
+            "repo_count": row[0],
+            "sum_stars": row[1],
+            "avg_stars": row[2],
+            "max_stars": row[3],
+            "sum_forks": row[4],
+            "avg_forks": row[5],
+            "max_forks": row[6],
+            "avg_watchers": row[7],
+            "archived_count": row[8],
+            "fork_count": row[9],
+            "avg_repo_age_days": row[10],
+            "days_since_last_push": row[11],
+            "has_description_ratio": row[12],
+        }
+
+    def get_global_language_frequencies(self, top_n):
+        """Return the *top_n* most-used languages across all repos.
+
+        Returns list of (language_name, frequency).
+        """
+        rows = self.conn.execute(
+            """
+            SELECT l.name, COUNT(DISTINCT rl.repository_id) AS freq
+            FROM repository_languages rl
+            JOIN languages l ON l.id = rl.language_id
+            GROUP BY l.name
+            ORDER BY freq DESC
+            LIMIT ?
+            """,
+            (top_n,),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def get_global_topic_frequencies(self, top_n):
+        """Return the *top_n* most-used topics across all repos.
+
+        Returns list of (topic_name, frequency).
+        """
+        rows = self.conn.execute(
+            """
+            SELECT t.name, COUNT(DISTINCT rt.repository_id) AS freq
+            FROM repository_topics rt
+            JOIN topics t ON t.id = rt.topic_id
+            GROUP BY t.name
+            ORDER BY freq DESC
+            LIMIT ?
+            """,
+            (top_n,),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def save_ml_prediction(self, username, prediction):
+        """Store the ML model's prediction (0 or 1) for *username*."""
+        self.conn.execute(
+            "UPDATE users SET ml_follow_prediction = ? WHERE username = ?",
+            (prediction, username),
+        )
+        self.conn.commit()
 
     def developer_profile(self, username):
         """Build a full developer profile dict for display."""

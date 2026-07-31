@@ -148,7 +148,7 @@ API          = "https://api.github.com"
 # Bot settings
 DAILY_FOLLOW_LIMIT = 90            # Max follows per day
 FOLLOW_DELAY       = 60            # Seconds between follow actions
-DATABASE           = "github_social.db"
+DATABASE           = "data/github_social.db"
 LOG_FILE           = "github_social.log"
 
 # Silent mode — human-like intervals (seconds)
@@ -168,7 +168,12 @@ SILENT_DELAY_BETWEEN_SCORES   = 30   # Between scoring users
 
 ## Database
 
-SQLite database (`github_social.db`) with the following tables:
+SQLite database (`data/github_social.db`) with the following tables:
+
+The database lives in its own `data/` directory.  In Docker the whole
+`./data` folder is mounted as `/app/data`, so the SQLite WAL/SHM files always
+land next to the DB file on the host — the container, host scripts, and
+PyCharm/DBeaver all share the exact same files.
 
 | Table | Description |
 |---|---|
@@ -192,8 +197,9 @@ python main.py --migrate-status   # show status
 
 ## Logging
 
-All operational events (rate limits, retries, scoring, shutdowns) are logged to
-`github_social.log` at DEBUG level.  The console shows only WARNING and above.
+All operational events (rate limits, retries, scoring, shutdowns) are logged at
+DEBUG level to `github_social.log` (in `./logs/` when running under Docker, via
+`/app/logs/github_social.log`).  The console shows only WARNING and above.
 
 ---
 
@@ -230,3 +236,8 @@ python main.py --follow
 
 > Your owner profile is synced from GitHub automatically on every command —
 > no manual `--collect-self` step needed.
+
+> **Note (Docker):** make sure `./data` and `./logs` exist and are writable by
+> the container user before `docker compose up` (`mkdir -p data logs`).  Docker
+> creates missing bind-mount sources as root, which would block writes from the
+> container (UID 1000).

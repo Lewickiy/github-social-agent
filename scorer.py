@@ -14,6 +14,7 @@ Score breakdown (0-100):
 
 import time
 
+from config import ML_ENABLED
 from logger import get_logger
 
 log = get_logger(__name__)
@@ -175,12 +176,27 @@ class Scorer:
 
         log.info("Scoring %d users", len(users))
 
+        # ── Load ML model ONCE before the loop ──
+        ml_model = None
+        ml_meta = None
+        if ML_ENABLED:
+            try:
+                from ml_service.inference import load_model
+                ml_model, ml_meta = load_model()
+                if ml_model is not None:
+                    log.info("ML model loaded for inference.")
+                else:
+                    log.debug("No ML model available — inference disabled.")
+            except Exception:
+                log.exception("Failed to load ML model")
+
         for (username,) in users:
             print("Scoring", username)
             log.debug("Scoring %s", username)
 
             # ── Try cached info first (avoid API call) ──
             info = self.db.get_user_cached_info(username)
+            fetched_from_api = False
 
             if info and info.get("public_repos") is not None and info.get("followers") is not None:
                 log.debug("Using cached info for %s", username)
@@ -188,12 +204,17 @@ class Scorer:
                 # Cache miss or incomplete data — fetch from API
                 try:
                     info = self.github.user(username)
+                    fetched_from_api = True
                 except Exception:
                     info = None
 
                 if not info:
                     log.warning("No profile data returned for %s", username)
                     continue
+
+            # ── Store full profile JSON for ML (only when from API) ──
+            if fetched_from_api:
+                self.db.store_full_profile(username, info)
 
             # ── Parse @-mentions from company field ──
             company_text = info.get("company")
@@ -211,6 +232,25 @@ class Scorer:
                 repo_days=repo_days,
             )
             self.db.update_score(username, score, info)
+
+            # ── ML inference (parallel to score, after scoring) ──
+            if ml_model is not None and ml_meta is not None:
+                try:
+                    from ml_service.inference import predict_single
+                    ml_pred = predict_single(
+                        ml_model, ml_meta, self.db, username,
+                    )
+                    if ml_pred is not None:
+                        label = "👍" if ml_pred == 1 else "👎"
+                        print(
+                            f"    🤖 ML: {label} "
+                            f"(followback {'likely' if ml_pred == 1 else 'unlikely'})"
+                        )
+                        log.debug(
+                            "ML prediction for %s: %d", username, ml_pred,
+                        )
+                except Exception:
+                    log.exception("ML inference error for %s", username)
 
             time.sleep(1)
 

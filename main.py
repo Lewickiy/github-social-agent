@@ -24,10 +24,12 @@ from company_worker import CompanyWorker
 from config import MY_USERNAME
 from database import Database
 from follow_engine import FollowEngine
+from followback_check_worker import FollowbackCheckWorker
 from github_client import GithubClient
 from logger import get_logger
 from scorer import Scorer
 from silent import SilentRunner
+from workers.ml_trainer import MLTrainerWorker
 
 log = get_logger(__name__)
 
@@ -119,12 +121,18 @@ def main():
         collector.sync_owner()                  # repos — only if stale (> 14 days)
         collector.scan_owner_followers()        # followers — always (FOLLOWBACK detection)
 
-    # ── Start background company worker for long-running modes ──
+    # ── Start background workers for long-running modes ──
     long_running = {"--silent", "--collect", "--collect-users", "--collect-users-rep", "--score", "--follow"}
     company_worker = None
+    followback_worker = None
+    ml_worker = None
     if long_running & set(sys.argv):
         company_worker = CompanyWorker(_shutdown)
         company_worker.start()
+        followback_worker = FollowbackCheckWorker(_shutdown)
+        followback_worker.start()
+        ml_worker = MLTrainerWorker(_shutdown)
+        ml_worker.start()
 
     try:
         if "--collect-self" in sys.argv:

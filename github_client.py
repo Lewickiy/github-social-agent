@@ -305,6 +305,29 @@ class GithubClient:
                 f"/user/following/{username}", original_exception=e
             ) from e
 
+    def does_user_follow_us(self, username, my_username):
+        """Check whether *username* follows *my_username*.
+
+        ``GET /users/{username}/following/{my_username}``
+        returns 204 (yes) or 404 (no).
+        """
+        try:
+            r = requests.get(
+                f"{API}/users/{username}/following/{my_username}",
+                headers=HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            return r.status_code == 204
+        except requests.exceptions.RequestException as e:
+            log.warning(
+                "Network error checking if %s follows %s: %s",
+                username, my_username, e,
+            )
+            raise GitHubNetworkError(
+                f"/users/{username}/following/{my_username}",
+                original_exception=e,
+            ) from e
+
     # --------------------------------------------------
     # Repositories & languages
     # --------------------------------------------------

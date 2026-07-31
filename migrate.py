@@ -90,7 +90,13 @@ def migrate(path=None):
     conn = sqlite3.connect(path or DATABASE)
     _ensure_migrations_table(conn)
 
-    # Включаем WAL-режим для параллельного доступа (Docker + DBeaver)
+    # Journal mode: WAL for parallel access (Docker container +
+    # PyCharm/DBeaver). SAFE now: the DB lives in data/github_social.db and
+    # the Docker container mounts the whole ./data dir as /app/data, so WAL
+    # and SHM files are created NEXT TO the DB file on the host — one shared
+    # filesystem location for the container, host scripts and IDE tools.
+    # (Previously WAL was forced while `./logs:/app/data` shadowed the DB
+    # path, splitting WAL/SHM into ./logs and corrupting the database.)
     conn.execute("PRAGMA journal_mode=WAL;")
 
     applied = _applied_names(conn)
