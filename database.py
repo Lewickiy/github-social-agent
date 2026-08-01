@@ -1047,3 +1047,76 @@ class Database:
             "topics": topics,
             "companies": companies,
         }
+
+    # --------------------------------------------------
+    # Job runs (dashboard)
+    # --------------------------------------------------
+
+    def create_job_run(self, mode):
+        """Insert a new job_run row.  Returns the new job id."""
+        now = datetime.now(timezone.utc).isoformat()
+        cur = self.conn.execute(
+            "INSERT INTO job_runs (mode, status, created_at) VALUES (?, 'PENDING', ?)",
+            (mode, now),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def mark_job_running(self, job_id, pid):
+        """Mark a job as RUNNING with its OS pid."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE job_runs SET status = 'RUNNING', pid = ?, started_at = ? WHERE id = ?",
+            (pid, now, job_id),
+        )
+        self.conn.commit()
+
+    def finish_job(self, job_id, exit_code, error=None):
+        """Mark a job as SUCCESS or FAILED based on its exit code."""
+        now = datetime.now(timezone.utc).isoformat()
+        status = "SUCCESS" if exit_code == 0 else "FAILED"
+        self.conn.execute(
+            """
+            UPDATE job_runs
+            SET status = ?, finished_at = ?, exit_code = ?, error = ?
+            WHERE id = ?
+            """,
+            (status, now, exit_code, error, job_id),
+        )
+        self.conn.commit()
+
+    def _job_row_to_dict(self, row):
+        """Map a job_runs row to a dict.
+
+        Column names are read once per connection via PRAGMA table_info so
+        the mapping stays in sync with the schema even if a future migration
+        adds a column to job_runs.
+        """
+        if not hasattr(self, "_job_columns"):
+            self._job_columns = [
+                r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(job_runs)"
+                ).fetchall()
+            ]
+        return dict(zip(self._job_columns, row))
+
+    def get_job(self, job_id):
+        """Return a single job_run row as a dict, or None."""
+        row = self.conn.execute(
+            "SELECT * FROM job_runs WHERE id = ?", (job_id,),
+        ).fetchone()
+        return self._job_row_to_dict(row) if row else None
+
+    def list_jobs(self, limit=50):
+        """Return the most recent job runs, newest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM job_runs ORDER BY id DESC LIMIT ?", (limit,),
+        ).fetchall()
+        return [self._job_row_to_dict(r) for r in rows]
+
+    def running_jobs(self):
+        """Return all job runs currently in RUNNING/PENDING state."""
+        rows = self.conn.execute(
+            "SELECT * FROM job_runs WHERE status IN ('RUNNING', 'PENDING')"
+        ).fetchall()
+        return [self._job_row_to_dict(r) for r in rows]
