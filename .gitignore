@@ -1,0 +1,41 @@
+# Environment secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+
+# Database (local data)
+github_social.db
+github_social.db-wal
+github_social.db-shm
+data/
+recovery_work/
+
+# Logs
+*.log
+logs/
+
+# ML model binaries
+models/
+
+# OS
+.DS_Store
+Thumbs.db

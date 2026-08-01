@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    @apply bg-canvas text-fg font-sans text-[14px] leading-[1.5];
+  }
+  ::selection {
+    @apply bg-[#b6d7ff];
+  }
+  /* GitHub-style thin scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #afb8c1 transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: #afb8c1;
+    border-radius: 6px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* GitHub "btn" */
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-btn-border bg-btn-bg px-3 py-1 text-[12px] font-medium text-fg transition-colors duration-100 select-none cursor-pointer;
+  }
+  .btn:hover {
+    @apply bg-btn-hover;
+  }
+  .btn:active {
+    @apply bg-canvas;
+  }
+  .btn-primary {
+    @apply border-success-emphasis bg-success-emphasis text-white;
+  }
+  .btn-primary:hover {
+    @apply bg-success;
+    border-color: #1a7f37;
+  }
+  .btn-danger {
+    @apply text-danger;
+  }
+  .btn-danger:hover {
+    @apply border-danger bg-danger text-white;
+  }
+
+  .input {
+    @apply rounded-md border border-border bg-canvas px-3 py-1 text-[13px] text-fg placeholder-fg-subtle transition-shadow duration-100;
+  }
+  .input:focus {
+    @apply outline-none border-accent shadow-focus;
+  }
+
+  .card {
+    @apply rounded-md border border-border bg-canvas shadow-card;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] font-medium leading-[1.4] whitespace-nowrap;
+  }
+
+  .tab-active {
+    @apply text-fg;
+  }
+  .tab-inactive {
+    @apply text-fg-muted;
+  }
+}
