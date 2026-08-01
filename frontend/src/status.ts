@@ -63,7 +63,6 @@ export const JOB_STATUS_META: Record<
 };
 
 export const STATUS_ORDER = [
-  "NEW",
   "FOLLOWED",
   "FOLLOWBACK",
   "UNFOLLOWED_AFTER_MUTUAL_FOLLOW",
@@ -128,6 +127,7 @@ export const MODE_LABELS: Record<string, { label: string; desc: string }> = {
   score: { label: "Score", desc: "Score / re-score all users" },
   follow: { label: "Follow", desc: "Follow top-scored users" },
   silent: { label: "Silent run", desc: "Stealth collect + score + follow" },
+  snapshot: { label: "Snapshot", desc: "Record today's profile snapshot" },
 };
 
 export function jobDuration(job: Job): string {

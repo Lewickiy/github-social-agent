@@ -7,6 +7,44 @@ return plain dicts/lists ready to be JSON-serialised by the API layer.
 import json
 from datetime import datetime, timedelta, timezone
 
+from config import GITHUB_API_RATE_LIMIT
+
+
+def github_api_usage(db, hours=1):
+    """Rolling GitHub API request usage for the overview card.
+
+    Counts every real round-trip the bot made to api.github.com (recorded
+    by github_client.record_api_request), so the card shows the *actual*
+    request rate over a rolling ``hours``-hour window — not a static
+    counter.  Also returns today's total and the share of GitHub's primary
+    hourly quota (GITHUB_API_RATE_LIMIT) that the window consumed.
+    """
+    conn = db.conn
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+    def _count(sql, params=()):
+        return conn.execute(sql, params).fetchone()[0]
+
+    rolling = _count(
+        "SELECT COUNT(*) FROM github_api_requests WHERE created_at >= ?",
+        (since,),
+    )
+    today = _count(
+        "SELECT COUNT(*) FROM github_api_requests "
+        "WHERE created_at >= ?",
+        (datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
+    )
+    total = _count("SELECT COUNT(*) FROM github_api_requests")
+
+    percent = round((rolling / GITHUB_API_RATE_LIMIT) * 100, 1) if GITHUB_API_RATE_LIMIT else 0.0
+    return {
+        "requests_last_hour": rolling,
+        "requests_today": today,
+        "requests_total": total,
+        "rate_limit": GITHUB_API_RATE_LIMIT,
+        "percent_last_hour": percent,
+    }
+
 
 # ── Overview / stats ──────────────────────────────────────────────────────
 
@@ -86,6 +124,42 @@ def activity_timeline(db, days=30):
     return out
 
 
+def followers_history(db, days=30):
+    """Daily snapshot history for the owner (for the followers chart).
+
+    Each point carries the day's followers / following / public repos
+    counts from the ``user_snapshots`` table.  If today has no snapshot
+    yet (the noon worker has not run), the latest stored follower count
+    is appended as today's point so the chart always shows current data.
+    """
+    owner = db.get_owner()
+    if not owner:
+        return []
+
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    points = [
+        {
+            "date": s["date"],
+            "followers": s["followers_count"] or 0,
+            "following": s["following_count"] or 0,
+            "public_repos": s["public_repos_count"] or 0,
+        }
+        for s in db.get_user_snapshots(owner, since_date=since)
+    ]
+
+    # Append the live follower count for today if no snapshot exists yet.
+    today = datetime.now(timezone.utc).date().isoformat()
+    if not points or points[-1]["date"] != today:
+        live = db.conn.execute(
+            "SELECT followers_count FROM users WHERE username = ?", (owner,)
+        ).fetchone()
+        if live and live[0] is not None:
+            points.append(
+                {"date": today, "followers": live[0], "following": None, "public_repos": None}
+            )
+    return points
+
+
 def status_distribution(db):
     """Count of users per status."""
     rows = db.conn.execute(
@@ -110,7 +184,7 @@ def score_buckets(db):
         GROUP BY bucket
         """
     ).fetchall()
-    order = ["unscored", "1-19", "20-39", "40-59", "60-79", "80-100"]
+    order = ["1-19", "20-39", "40-59", "60-79", "80-100"]
     d = {r[0]: r[1] for r in rows}
     return [{"bucket": b, "count": d.get(b, 0)} for b in order]
 

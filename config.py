@@ -20,6 +20,11 @@ MY_USERNAME = "Lewickiy"
 
 API = "https://api.github.com"
 
+# GitHub's primary rate limit for authenticated requests (requests/hour).
+# The dashboard's "GitHub API / hour" card compares real traffic against
+# this ceiling.
+GITHUB_API_RATE_LIMIT = 5000
+
 
 def get_headers():
     """Build request headers.  Raises if GITHUB_TOKEN is missing.
@@ -79,9 +84,16 @@ LOG_FILE = os.getenv("LOG_FILE", "github_social.log")
 # SILENT MODE — human-like intervals (seconds)
 # =====================================================
 
-SILENT_DELAY_BETWEEN_USERS = 1  # pause between users (2 min)
-SILENT_DELAY_BETWEEN_REPOS = 2  # pause between repos of one user (was 2; throttled to avoid /languages abuse)
-SILENT_DELAY_BETWEEN_REQUESTS = 3  # pause between API calls within a repo (was 1; throttled to avoid rate-limit)
+SILENT_DELAY_BETWEEN_USERS = 1  # pause between users
+# ── Delays reduced 3/2 → 1/1 (API_using.md §7.1) ───────────────────────
+# The primary GitHub limit (5 000 req/h) is used at only ~13–16 %, so the
+# old 5 s-per-repo stealth sleep was the real bottleneck (85–130 days for
+# the ~33k-user queue).  1 s + the built-in ±30 % jitter keeps a
+# human-ish rhythm while being ~3× faster.  The dominant /languages
+# traffic is cut further by SKIP_FORK_LANGUAGES (§7.2) and ETag/304
+# conditional requests (§7.3).
+SILENT_DELAY_BETWEEN_REPOS = 1      # was 2 (throttled to avoid /languages abuse)
+SILENT_DELAY_BETWEEN_REQUESTS = 1   # was 3 (throttled to avoid rate-limit)
 SILENT_DELAY_BETWEEN_SCORES = 1  # pause between scoring users
 SILENT_DELAY_BETWEEN_FOLLOWS = 2  # pause between follow actions in silent mode
 
@@ -116,6 +128,19 @@ FOLLOWER_SCAN_DAYS = 5        # re-scan follower graph at most this often
 # to detect those who unfollowed us after a mutual follow.
 FOLLOWBACK_CHECK_INTERVAL_HOURS = 1
 
+# =====================================================
+# HISTORICAL SNAPSHOTS — daily mutable-profile snapshots
+# =====================================================
+
+# Hour of day (server local time) at which the snapshot worker records
+# the daily snapshot of the owner's followers / following / public repos.
+SNAPSHOT_HOUR = 12
+
+# Take a snapshot immediately when the worker starts (in addition to the
+# scheduled noon one).  Ensures today has a data point even when the bot
+# is started outside the noon window.
+SNAPSHOT_ON_START = True
+
 # When True, process less-followed users first within each priority group
 # (maximises follow-backs — smaller accounts are more likely to reciprocate).
 # When False (default), popular users go first (richer data, better scoring).
@@ -149,3 +174,12 @@ ML_TOP_TOPICS = 50                 # top-N topics for multi-hot encoding
 READ_HEAVY_FORK_LANGUAGES = False
 SKIP_LANGS_MAX_SIZE_KB = 500_000   # 500 MB
 SKIP_LANGS_FORK_SIZE_KB = 50_000    # 50 MB
+
+# ── Skip /languages entirely for forked repos (API_using.md §7.2) ───────
+# A fork mirrors an upstream repo, so its language breakdown is nearly
+# identical to the source — low signal for similarity scoring.  Forks are
+# ~54 % of all collected repos, so skipping them cuts the dominant
+# /languages API traffic almost in half.  Setting
+# `READ_HEAVY_FORK_LANGUAGES` to True still overrides this and fetches
+# languages for every repo (legacy behaviour).
+SKIP_FORK_LANGUAGES = True

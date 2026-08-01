@@ -19,6 +19,7 @@ from config import (
     MY_USERNAME,
     OWNER_SYNC_DAYS,
     READ_HEAVY_FORK_LANGUAGES,
+    SKIP_FORK_LANGUAGES,
     SKIP_LANGS_FORK_SIZE_KB,
     SKIP_LANGS_MAX_SIZE_KB,
 )
@@ -26,6 +27,7 @@ from github_client import (
     FALLBACK_RETRY_DELAYS,
     GitHubAuthError,
     GitHubNetworkError,
+    GitHubNotModified,
     GitHubRateLimitError,
     LONG_HINT_THRESHOLD,
     first_wait_from_headers,
@@ -505,9 +507,10 @@ class Collector:
             if company_text:
                 self.db.extract_and_save_companies(username, company_text)
 
-            # ── Fetch repos ──
+            # ── Fetch repos (ETag conditional — 304 = unchanged, free) ──
+            repos_etag = self.db.get_repos_etag(username)
             try:
-                repos = self.github.repos(username)
+                repos = self.github.repos(username, etag=repos_etag)
             except GitHubAuthError as exc:
                 self._abort_on_auth_error(exc)
                 return
@@ -527,6 +530,19 @@ class Collector:
                     return
                 # result == "cooldown_done" → retry the same user
                 continue
+            except GitHubNotModified:
+                # Repo list unchanged since last fetch — nothing new to
+                # collect.  Backfill any repos whose languages were missed
+                # in a previous aborted run, then refresh the user-level
+                # TTL so the user leaves the queue.
+                log.debug("[%d/%d] Repos for %s unchanged (304) — skipping", idx, total, username)
+                self._backfill_missing_languages(username)
+                self.db.mark_repos_fetched(username)
+                return
+
+            # Persist the collection ETag for the next (free) 304.
+            if self.github.last_etag:
+                self.db.set_repos_etag(username, self.github.last_etag)
 
             for repo in repos:
                 if self._shutdown.is_set():
@@ -536,16 +552,21 @@ class Collector:
 
                 # Heavy / fork filter — skip /languages for heavyweight
                 # repos / large forks (avoids secondary-rate-limit triggers).
+                # When SKIP_FORK_LANGUAGES is True (default) /languages is
+                # skipped for ALL forks (API_using.md §7.2).
                 _should_lang = should_fetch_languages(
                     repo,
                     fork_threshold_kb=SKIP_LANGS_FORK_SIZE_KB,
                     max_threshold_kb=SKIP_LANGS_MAX_SIZE_KB,
                     read_heavy_forks=READ_HEAVY_FORK_LANGUAGES,
+                    skip_forks=SKIP_FORK_LANGUAGES,
                 )
 
                 if _should_lang:
+                    # Languages (ETag conditional — 304 = unchanged, free)
+                    lang_etag = self.db.get_languages_etag(repo_id)
                     try:
-                        langs = self.github.repo_languages(username, repo["name"])
+                        langs = self.github.repo_languages(username, repo["name"], etag=lang_etag)
                     except GitHubAuthError as exc:
                         self._abort_on_auth_error(exc)
                         return
@@ -566,6 +587,14 @@ class Collector:
                         # Rate limit on languages — skip remaining languages for
                         # this user but keep the already-saved repos.
                         break
+                    except GitHubNotModified:
+                        # Languages unchanged — cached copy is still valid.
+                        log.debug("Collector: %s/%s languages unchanged (304)", username, repo["name"])
+                        langs = None
+                    else:
+                        # Persist the fresh ETag so the next run is a free 304.
+                        if self.github.last_etag:
+                            self.db.set_languages_etag(repo_id, self.github.last_etag)
 
                     if langs:
                         self.db.save_repository_languages(repo_id, langs)
@@ -590,6 +619,56 @@ class Collector:
 
             self._sleep(1)
             break  # user done, move to next
+
+    def _backfill_missing_languages(self, username):
+        """Fetch languages for repos that never got them (last_checked_at NULL).
+
+        Called on the repos-304 fast-path: when the repo list is unchanged
+        we still want to complete language data for repos missed in a
+        previous aborted run (rate limit / network error mid-user), so
+        scoring stays accurate.  Forks are skipped when
+        ``SKIP_FORK_LANGUAGES`` is True.
+        """
+        missing = self.db.repos_needing_languages(
+            username, skip_forks=SKIP_FORK_LANGUAGES,
+        )
+        for repo_id, repo_name in missing:
+            if self._shutdown.is_set():
+                return
+            lang_etag = self.db.get_languages_etag(repo_id)
+            try:
+                langs = self.github.repo_languages(username, repo_name, etag=lang_etag)
+            except GitHubAuthError as exc:
+                self._abort_on_auth_error(exc)
+                return
+            except GitHubNetworkError as exc:
+                result = self._handle_network_error(exc)
+                if result == "shutdown":
+                    return
+                break
+            except GitHubRateLimitError as exc:
+                log.warning(
+                    "Rate limit (%s) fetching languages for %s/%s",
+                    exc.status_code, username, repo_name,
+                )
+                print(f"\n  ⚠ Rate limit ({exc.status_code}) on languages for {username}/{repo_name}")
+                result = self._handle_rate_limit(exc)
+                if result == "shutdown":
+                    return
+                break
+            except GitHubNotModified:
+                langs = None
+            else:
+                if self.github.last_etag:
+                    self.db.set_languages_etag(repo_id, self.github.last_etag)
+            if langs:
+                self.db.save_repository_languages(repo_id, langs)
+            # Repo verified now (real fetch or free 304) — start per-repo TTL.
+            self.db.mark_repo_checked(repo_id)
+            # Keep the same cadence as silent's backfill so a batch of
+            # previously-missed repos doesn't hammer /languages back-to-back.
+            if not self._sleep(1):
+                return
 
     # ------------------------------------------------------------------
     # Public entry points

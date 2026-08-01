@@ -14,8 +14,10 @@ import type { Config, Job } from "../types";
 import { JobStatusBadge } from "../components/StatusBadge";
 import { usePolling } from "../hooks/usePolling";
 import { jobDuration, MODE_LABELS } from "../status";
+import { REFRESH_OPTIONS, useRefresh } from "../refresh";
 
 export default function ManagementPage() {
+  const { intervalMs, intervalLabel, optionIndex, setIntervalMs } = useRefresh();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -39,10 +41,12 @@ export default function ManagementPage() {
     load();
   }, [load]);
 
-  // Poll fast (8s) while a job is running so statuses update live;
-  // otherwise settle into the default 5-minute cadence.
+  // Poll fast while a job is running so statuses update live; otherwise
+  // settle into the user-selected cadence (default 1 min, 3s–30m slider).
   const running = jobs.filter((j) => j.status === "RUNNING");
-  usePolling(load, () => (running.length > 0 ? 8000 : 5 * 60 * 1000));
+  usePolling(load, () =>
+    running.length > 0 ? Math.min(8000, intervalMs) : intervalMs
+  );
 
   const startJob = async (mode: string) => {
     setStarting(mode);
@@ -89,6 +93,47 @@ export default function ManagementPage() {
           {error}
         </div>
       )}
+
+      {/* Data refresh interval — applied instantly, no confirmation */}
+      <div className="card p-4">
+        <div className="flex items-center gap-2 mb-1">
+          <RefreshCw size={15} className="text-accent" />
+          <h2 className="text-[14px] font-semibold">Data refresh interval</h2>
+          <span className="ml-auto badge bg-accent/10 text-accent border border-accent/30">
+            every {intervalLabel}
+          </span>
+        </div>
+        <p className="text-[12px] text-fg-muted mb-3">
+          All dashboard pages re-fetch their data on this cadence. Changes
+          apply immediately across Overview, Users and Management.
+        </p>
+
+        <input
+          type="range"
+          min={0}
+          max={REFRESH_OPTIONS.length - 1}
+          step={1}
+          value={optionIndex}
+          onChange={(e) =>
+            setIntervalMs(REFRESH_OPTIONS[Number(e.target.value)].ms)
+          }
+          className="w-full h-2 rounded-full bg-border-muted accent-accent cursor-pointer"
+          aria-label="Data refresh interval"
+        />
+
+        <div className="grid grid-cols-10 mt-1.5 text-[11px] text-fg-subtle">
+          {REFRESH_OPTIONS.map((o, i) => (
+            <span
+              key={o.ms}
+              className={`text-center truncate px-0.5 ${
+                i === optionIndex ? "text-accent font-semibold" : ""
+              }`}
+            >
+              {o.label}
+            </span>
+          ))}
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Job launcher */}

@@ -17,8 +17,12 @@ export function usePolling(
   const cbRef = useRef(callback);
   cbRef.current = callback;
 
-  const intervalRef = useRef(intervalMs);
-  intervalRef.current = intervalMs;
+  // Resolve the delay on every render.  When the resolved value changes the
+  // effect below re-runs and the *pending* timer is replaced immediately, so
+  // switching the Management slider (e.g. 30m -> 3s) takes effect right away
+  // instead of waiting out the previously scheduled long tick.
+  const delay =
+    typeof intervalMs === "function" ? intervalMs() : intervalMs;
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
@@ -35,10 +39,6 @@ export function usePolling(
     };
 
     const schedule = () => {
-      const delay =
-        typeof intervalRef.current === "function"
-          ? intervalRef.current()
-          : intervalRef.current;
       if (delay > 0) timer = setTimeout(run, delay);
     };
 
@@ -47,6 +47,5 @@ export function usePolling(
       cancelled = true;
       clearTimeout(timer);
     };
-    // Empty deps: refs hold the latest callback/interval on every render.
-  }, []);
+  }, [delay]);
 }

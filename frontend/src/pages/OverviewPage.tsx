@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Activity,
-  Bot,
+  Gauge,
   HeartHandshake,
   Sparkles,
   Target,
@@ -13,15 +13,17 @@ import {
 import { api, timeAgo } from "../api";
 import type { Stats } from "../types";
 import StatCard from "../components/StatCard";
-import ActivityChart from "../components/ActivityChart";
+import FollowersChart from "../components/FollowersChart";
 import { ScoreBars, StatusBars } from "../components/DistributionCharts";
 import { JobStatusBadge } from "../components/StatusBadge";
 import { usePolling } from "../hooks/usePolling";
 import { MODE_LABELS } from "../status";
+import { useRefresh } from "../refresh";
 
 export default function OverviewPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { intervalMs, intervalLabel } = useRefresh();
 
   const load = async () => {
     try {
@@ -36,8 +38,8 @@ export default function OverviewPage() {
     load();
   }, []);
 
-  // Auto-refresh every 5 minutes (no manual button).
-  usePolling(load, 5 * 60 * 1000);
+  // Auto-refresh on the user-selected cadence (default 1 min, 3s–30m slider).
+  usePolling(load, intervalMs);
 
   if (error && !stats) {
     return (
@@ -65,9 +67,13 @@ export default function OverviewPage() {
             <div key={i} className="card h-[88px]" />
           ))}
         </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+          <div className="card h-[300px]" />
+          <div className="card h-[300px]" />
+        </div>
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
-          <div className="card h-[280px] lg:col-span-2" />
           <div className="card h-[280px]" />
+          <div className="card h-[280px] lg:col-span-2" />
         </div>
       </div>
     );
@@ -88,7 +94,7 @@ export default function OverviewPage() {
             <Link to="/users" className="text-accent hover:underline">
               @{stats.owner ?? "your account"}
             </Link>{" "}
-            — auto-refreshes every 5 minutes
+            — auto-refreshes every {intervalLabel}
           </p>
         </div>
       </div>
@@ -154,53 +160,40 @@ export default function OverviewPage() {
           sub="follow actions logged"
         />
         <StatCard
-          label="Jobs today"
-          value={stats.jobs.filter((j) => {
-            const d = j.started_at ? new Date(j.started_at) : null;
-            return d && d.toDateString() === new Date().toDateString();
-          }).length}
-          icon={<Bot size={16} />}
-          sub={
-            stats.jobs.some((j) => j.status === "RUNNING")
-              ? "a job is running"
-              : "all idle"
+          label="GitHub API requests / hour"
+          value={stats.github_usage.requests_last_hour}
+          icon={<Gauge size={16} />}
+          accent={
+            stats.github_usage.percent_last_hour >= 90
+              ? "danger"
+              : stats.github_usage.percent_last_hour >= 70
+              ? "attention"
+              : "default"
           }
+          sub={`${stats.github_usage.requests_today} today · ${stats.github_usage.percent_last_hour}% of ${stats.github_usage.rate_limit.toLocaleString()}/hr limit`}
+          hint={`${stats.github_usage.requests_total.toLocaleString()} requests logged total`}
         />
       </div>
 
-      {/* Follow limit progress */}
-      <div className="card p-4">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-[13px] font-medium text-fg">
-            Daily follow budget
-          </span>
-          <span className="text-[12px] text-fg-muted">
-            {stats.today_follows} of {stats.daily_limit} used
-          </span>
+      {/* Followers growth + Pipeline status — one row */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="card p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div>
+              <h2 className="text-[14px] font-semibold">Followers growth</h2>
+              <p className="text-[12px] text-fg-muted">
+                daily snapshot · followers & following, last 30 days
+              </p>
+            </div>
+            <span className="text-[12px] text-fg-muted shrink-0">
+              {stats.followers_history.length === 0
+                ? "no snapshots yet"
+                : `${stats.followers_history[stats.followers_history.length - 1].followers} followers`}
+            </span>
+          </div>
+          <FollowersChart data={stats.followers_history} />
         </div>
-        <div className="h-2 bg-canvas-subtle rounded-full overflow-hidden border border-border-muted">
-          <div
-            className={`h-full rounded-full transition-all duration-500 ${
-              pctLimit >= 90
-                ? "bg-danger"
-                : pctLimit >= 70
-                  ? "bg-attention"
-                  : "bg-success-emphasis"
-            }`}
-            style={{ width: `${Math.min(100, pctLimit)}%` }}
-          />
-        </div>
-      </div>
 
-      {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="card p-4 lg:col-span-2">
-          <h2 className="text-[14px] font-semibold mb-1">Follow activity</h2>
-          <p className="text-[12px] text-fg-muted mb-2">
-            FOLLOW actions per day, last 30 days
-          </p>
-          <ActivityChart data={stats.activity} />
-        </div>
         <div className="card p-4">
           <h2 className="text-[14px] font-semibold mb-1">Pipeline status</h2>
           <p className="text-[12px] text-fg-muted mb-2">

@@ -1,5 +1,6 @@
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { BarChart3, Settings, Users } from "lucide-react";
+import { RefreshProvider } from "./refresh";
 import OverviewPage from "./pages/OverviewPage";
 import UsersPage from "./pages/UsersPage";
 import ManagementPage from "./pages/ManagementPage";
@@ -54,12 +55,14 @@ export default function App() {
       </header>
 
       <main className="flex-1 bg-canvas-subtle">
-        <Routes>
-          <Route path="/" element={<OverviewPage />} />
-          <Route path="/users" element={<UsersPage />} />
-          <Route path="/manage" element={<ManagementPage />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <RefreshProvider>
+          <Routes>
+            <Route path="/" element={<OverviewPage />} />
+            <Route path="/users" element={<UsersPage />} />
+            <Route path="/manage" element={<ManagementPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </RefreshProvider>
       </main>
     </div>
   );
