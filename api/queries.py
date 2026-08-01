@@ -7,7 +7,7 @@ return plain dicts/lists ready to be JSON-serialised by the API layer.
 import json
 from datetime import datetime, timedelta, timezone
 
-from config import GITHUB_API_RATE_LIMIT
+from core.config import GITHUB_API_RATE_LIMIT
 
 
 def github_api_usage(db, hours=1):

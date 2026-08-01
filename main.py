@@ -20,18 +20,18 @@ import signal
 import sys
 import threading
 
-from collector import Collector
-from company_worker import CompanyWorker
-from config import MY_USERNAME
-from database import Database
-from follow_engine import FollowEngine
-from followback_check_worker import FollowbackCheckWorker
-from github_client import GithubClient
-from logger import get_logger
-from scorer import Scorer
-from silent import SilentRunner
-from snapshot_worker import SnapshotWorker, take_snapshot_now
+from core.config import MY_USERNAME
+from core.database import Database
+from core.github_client import GithubClient
+from core.logger import get_logger
+from services.collector import Collector
+from services.follow_engine import FollowEngine
+from services.scorer import Scorer
+from services.silent import SilentRunner
+from workers.company_worker import CompanyWorker
+from workers.followback_check_worker import FollowbackCheckWorker
 from workers.ml_trainer import MLTrainerWorker
+from workers.snapshot_worker import SnapshotWorker, take_snapshot_now
 
 log = get_logger(__name__)
 
@@ -219,11 +219,11 @@ def main():
             print("Snapshot cycle finished.")
 
         elif "--migrate" in sys.argv:
-            from migrate import migrate
+            from migrations.runner import migrate
             migrate()
 
         elif "--migrate-status" in sys.argv:
-            from migrate import status
+            from migrations.runner import status
             status()
 
         else:

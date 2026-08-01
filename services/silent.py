@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from config import (
+from core.config import (
     DAILY_FOLLOW_LIMIT,
     ML_ENABLED,
     OWNER_FOLLOWER_SCAN_INTERVAL,
@@ -26,8 +26,7 @@ from config import (
     SKIP_LANGS_FORK_SIZE_KB,
     SKIP_LANGS_MAX_SIZE_KB,
 )
-from collector import Collector
-from github_client import (
+from core.github_client import (
     GitHubAuthError,
     GitHubNetworkError,
     GitHubNotModified,
@@ -36,8 +35,10 @@ from github_client import (
     first_wait_from_headers,
     should_fetch_languages,
 )
-from logger import get_logger
-from scorer import Scorer
+from core.logger import get_logger
+
+from .collector import Collector
+from .scorer import Scorer
 
 log = get_logger(__name__)
 
@@ -302,7 +303,7 @@ class SilentRunner:
                 #    rate limit (abuse detection).  Controlled by
                 #    READ_HEAVY_FORK_LANGUAGES in config.py.  When
                 #    SKIP_FORK_LANGUAGES is True (default) /languages is
-                #    skipped for ALL forks (API_using.md §7.2).
+                #    skipped for ALL forks (documentation/API_using.md §7.2).
                 _should_lang = should_fetch_languages(
                     repo,
                     fork_threshold_kb=SKIP_LANGS_FORK_SIZE_KB,

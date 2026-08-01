@@ -5,7 +5,7 @@ Runs once per hour and verifies that confirmed mutual-follow users
 
 Usage in main.py::
 
-    from followback_check_worker import FollowbackCheckWorker
+    from workers.followback_check_worker import FollowbackCheckWorker
     worker = FollowbackCheckWorker(shutdown_event)
     worker.start()
 """
@@ -13,8 +13,8 @@ Usage in main.py::
 import threading
 import time
 
-from config import FOLLOWBACK_CHECK_INTERVAL_HOURS, MY_USERNAME
-from logger import get_logger
+from core.config import FOLLOWBACK_CHECK_INTERVAL_HOURS, MY_USERNAME
+from core.logger import get_logger
 
 log = get_logger(__name__)
 
@@ -41,8 +41,8 @@ class FollowbackCheckWorker(threading.Thread):
 
     def run(self):
         # Import inside thread to avoid circular imports at module level
-        from database import Database
-        from github_client import GithubClient
+        from core.database import Database
+        from core.github_client import GithubClient
 
         db = Database()
         github = GithubClient()
@@ -71,7 +71,7 @@ class FollowbackCheckWorker(threading.Thread):
 
     def _check_all(self, db, github):
         """Walk every mutual-follow user and detect unfollowers."""
-        from github_client import GitHubNetworkError, GitHubRateLimitError
+        from core.github_client import GitHubNetworkError, GitHubRateLimitError
 
         users = db.get_mutual_follow_users()
         if not users:

@@ -10,7 +10,7 @@ than our local updated_at.
 
 Usage in main.py::
 
-    from company_worker import CompanyWorker
+    from workers.company_worker import CompanyWorker
     worker = CompanyWorker(shutdown_event)
     worker.start()
 """
@@ -18,12 +18,12 @@ Usage in main.py::
 import threading
 import time
 
-from logger import get_logger
+from core.logger import get_logger
 
 log = get_logger(__name__)
 
 # Re-export for backward compatibility
-from database import extract_companies  # noqa: F401
+from core.database import extract_companies  # noqa: F401
 
 COMPANY_FETCH_INTERVAL = 300  # 5 minutes between fetches
 
@@ -51,8 +51,8 @@ class CompanyWorker(threading.Thread):
 
     def run(self):
         # Import inside thread to avoid circular imports at module level
-        from database import Database
-        from github_client import GithubClient
+        from core.database import Database
+        from core.github_client import GithubClient
 
         db = Database()
         github = GithubClient()

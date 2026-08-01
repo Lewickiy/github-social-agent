@@ -15,7 +15,7 @@ exits cleanly.
 import threading
 import time
 
-from config import (
+from core.config import (
     MY_USERNAME,
     OWNER_SYNC_DAYS,
     READ_HEAVY_FORK_LANGUAGES,
@@ -23,7 +23,7 @@ from config import (
     SKIP_LANGS_FORK_SIZE_KB,
     SKIP_LANGS_MAX_SIZE_KB,
 )
-from github_client import (
+from core.github_client import (
     FALLBACK_RETRY_DELAYS,
     GitHubAuthError,
     GitHubNetworkError,
@@ -33,7 +33,7 @@ from github_client import (
     first_wait_from_headers,
     should_fetch_languages,
 )
-from logger import get_logger
+from core.logger import get_logger
 
 log = get_logger(__name__)
 
@@ -553,7 +553,7 @@ class Collector:
                 # Heavy / fork filter — skip /languages for heavyweight
                 # repos / large forks (avoids secondary-rate-limit triggers).
                 # When SKIP_FORK_LANGUAGES is True (default) /languages is
-                # skipped for ALL forks (API_using.md §7.2).
+                # skipped for ALL forks (documentation/API_using.md §7.2).
                 _should_lang = should_fetch_languages(
                     repo,
                     fork_threshold_kb=SKIP_LANGS_FORK_SIZE_KB,

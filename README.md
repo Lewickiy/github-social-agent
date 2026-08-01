@@ -32,7 +32,7 @@ data — no manual setup step required.
 # 1. Install dependencies
 pip install requests
 
-# 2. Set your GitHub token (or edit config.py)
+# 2. Set your GitHub token (or edit core/config.py)
 export GITHUB_TOKEN="ghp_..."
 
 # 3. Initialise the database
@@ -137,7 +137,7 @@ topic_score = int(jaccard * 20)
 
 ---
 
-## Configuration (`config.py`)
+## Configuration (`core/config.py`)
 
 ```python
 # GitHub API
@@ -149,7 +149,7 @@ API          = "https://api.github.com"
 DAILY_FOLLOW_LIMIT = 90            # Max follows per day
 FOLLOW_DELAY       = 60            # Seconds between follow actions
 DATABASE           = "data/github_social.db"
-LOG_FILE           = "github_social.log"
+LOG_FILE           = "logs/github_social.log"
 
 # Silent mode — human-like intervals (seconds)
 SILENT_DELAY_BETWEEN_USERS    = 120  # Between users (2 min)
@@ -162,7 +162,24 @@ SILENT_DELAY_BETWEEN_SCORES   = 30   # Between scoring users
 
 | Variable | Description |
 |---|---|
-| `GITHUB_TOKEN` | Personal access token (overrides `config.py` default) |
+| `GITHUB_TOKEN` | Personal access token (overrides `core/config.py` default) |
+
+## Project structure
+
+```
+main.py                 # CLI entry point (all bot commands)
+api/                    # FastAPI dashboard (reads the same SQLite DB)
+core/                   # Infrastructure: config, logger, database, github_client
+services/               # Bot logic: collector, scorer, silent, follow_engine
+workers/                # Background daemon threads (company, followback, ML, snapshots)
+ml_service/             # PyTorch followback-predictor (features, model, training, inference)
+migrations/             # SQLite migrations + runner (python -m migrations.runner)
+documentation/          # Analytical docs (Analyse.md, API_using.md, UI.md)
+frontend/               # React dashboard (SPA served by api/)
+data/                   # SQLite database (gitignored)
+logs/                   # Application logs (gitignored)
+models/                 # Trained ML models (gitignored)
+```
 
 ---
 

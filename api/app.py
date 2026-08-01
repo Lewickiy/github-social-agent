@@ -38,8 +38,8 @@ from api.queries import (
     status_distribution,
     user_profile,
 )
-from config import DAILY_FOLLOW_LIMIT
-from database import Database
+from core.config import DAILY_FOLLOW_LIMIT
+from core.database import Database
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -393,7 +393,7 @@ def languages():
 
 @app.get("/api/config")
 def config_view():
-    import config as cfg
+    import core.config as cfg
 
     return {
         "my_username": cfg.MY_USERNAME,

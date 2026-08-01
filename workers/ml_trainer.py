@@ -14,12 +14,12 @@ Usage in main.py::
 import threading
 import time
 
-from config import (
+from core.config import (
     ML_ENABLED,
     ML_TRAIN_AFTER_START,
     ML_TRAIN_INTERVAL_HOURS,
 )
-from logger import get_logger
+from core.logger import get_logger
 
 log = get_logger(__name__)
 
@@ -54,7 +54,7 @@ class MLTrainerWorker(threading.Thread):
         self._train_after_start = train_after_start and ML_ENABLED
 
     def run(self):
-        from database import Database
+        from core.database import Database
 
         db = Database()
 

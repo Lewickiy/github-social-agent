@@ -1,9 +1,9 @@
 """Simple migration runner for SQLite.
 
 Usage:
-    python migrate.py              # apply all pending migrations
-    python migrate.py --status     # show applied / pending migrations
-    python migrate.py --rollback   # undo the last migration
+    python -m migrations.runner         # apply all pending migrations
+    python -m migrations.runner --status    # show applied / pending migrations
+    python -m migrations.runner --rollback  # undo the last migration
 """
 
 import os
@@ -11,9 +11,9 @@ import sys
 import sqlite3
 import importlib.util
 
-from config import DATABASE
+from core.config import DATABASE
 
-MIGRATIONS_DIR = os.path.join(os.path.dirname(__file__), "migrations")
+MIGRATIONS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _load_module(path):
@@ -44,9 +44,11 @@ def _applied_names(conn):
 def _migration_files():
     if not os.path.isdir(MIGRATIONS_DIR):
         return []
+    # Only numbered migration files (NNN_name.py); excludes runner.py,
+    # __init__.py, and anything starting with an underscore.
     files = sorted(
         f for f in os.listdir(MIGRATIONS_DIR)
-        if f.endswith(".py") and not f.startswith("_")
+        if f.endswith(".py") and f[:3].isdigit()
     )
     return files
 

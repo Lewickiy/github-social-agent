@@ -11,13 +11,13 @@ changing ``_snapshot_targets`` — no schema or UI changes are needed.
 
 Usage in main.py::
 
-    from snapshot_worker import SnapshotWorker
+    from workers.snapshot_worker import SnapshotWorker
     worker = SnapshotWorker(shutdown_event)
     worker.start()
 
 One-shot run (manual trigger)::
 
-    from snapshot_worker import SnapshotWorker
+    from workers.snapshot_worker import SnapshotWorker
     SnapshotWorker.take_snapshot_now(db, github)
 """
 
@@ -25,9 +25,9 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from config import SNAPSHOT_HOUR, SNAPSHOT_ON_START
-from github_client import GitHubAuthError, GitHubNetworkError, GitHubRateLimitError
-from logger import get_logger
+from core.config import SNAPSHOT_HOUR, SNAPSHOT_ON_START
+from core.github_client import GitHubAuthError, GitHubNetworkError, GitHubRateLimitError
+from core.logger import get_logger
 
 log = get_logger(__name__)
 
@@ -66,8 +66,8 @@ class SnapshotWorker(threading.Thread):
         self._on_start = snapshot_on_start
 
     def run(self):
-        from database import Database
-        from github_client import GithubClient
+        from core.database import Database
+        from core.github_client import GithubClient
 
         db = Database()
         github = GithubClient()

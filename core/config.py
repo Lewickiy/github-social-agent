@@ -4,7 +4,8 @@ from pathlib import Path
 # Load .env file from project root (for PyCharm and terminal)
 try:
     from dotenv import load_dotenv
-    _env_path = Path(__file__).parent / ".env"
+    # Project root is two levels up from core/config.py
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
     if _env_path.exists():
         load_dotenv(_env_path)
 except ImportError:
@@ -78,14 +79,14 @@ FOLLOW_DELAY = 60
 
 DATABASE = os.getenv("DATABASE", "data/github_social.db")
 
-LOG_FILE = os.getenv("LOG_FILE", "github_social.log")
+LOG_FILE = os.getenv("LOG_FILE", "logs/github_social.log")
 
 # =====================================================
 # SILENT MODE — human-like intervals (seconds)
 # =====================================================
 
 SILENT_DELAY_BETWEEN_USERS = 1  # pause between users
-# ── Delays reduced 3/2 → 1/1 (API_using.md §7.1) ───────────────────────
+# ── Delays reduced 3/2 → 1/1 (documentation/API_using.md §7.1) ────────
 # The primary GitHub limit (5 000 req/h) is used at only ~13–16 %, so the
 # old 5 s-per-repo stealth sleep was the real bottleneck (85–130 days for
 # the ~33k-user queue).  1 s + the built-in ±30 % jitter keeps a
@@ -175,7 +176,7 @@ READ_HEAVY_FORK_LANGUAGES = False
 SKIP_LANGS_MAX_SIZE_KB = 500_000   # 500 MB
 SKIP_LANGS_FORK_SIZE_KB = 50_000    # 50 MB
 
-# ── Skip /languages entirely for forked repos (API_using.md §7.2) ───────
+# ── Skip /languages entirely for forked repos (documentation/API_using.md §7.2)
 # A fork mirrors an upstream repo, so its language breakdown is nearly
 # identical to the source — low signal for similarity scoring.  Forks are
 # ~54 % of all collected repos, so skipping them cuts the dominant

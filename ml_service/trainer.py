@@ -15,8 +15,8 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-from config import ML_MODEL_DIR, ML_TOP_LANGUAGES, ML_TOP_TOPICS
-from logger import get_logger
+from core.config import ML_MODEL_DIR, ML_TOP_LANGUAGES, ML_TOP_TOPICS
+from core.logger import get_logger
 
 from .features import build_feature_vector_for_training
 from .model import FollowbackPredictor

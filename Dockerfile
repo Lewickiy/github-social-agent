@@ -27,6 +27,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ── Код ──
 COPY *.py .
 COPY api/ api/
+COPY core/ core/
+COPY services/ services/
 COPY migrations/ migrations/
 COPY ml_service/ ml_service/
 COPY workers/ workers/

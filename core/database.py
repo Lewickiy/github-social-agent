@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from config import (
+from core.config import (
     DATABASE,
     CURRENT_SCORE_VERSION,
     REPO_FRESHNESS_DAYS,

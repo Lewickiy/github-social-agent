@@ -1,7 +1,7 @@
 import requests
 
-from config import API, HEADERS
-from logger import get_logger
+from core.config import API, HEADERS
+from core.logger import get_logger
 
 log = get_logger(__name__)
 
@@ -19,7 +19,7 @@ def record_api_request(endpoint, status_code=None):
     is naturally thread-safe across the worker threads.
     """
     try:
-        from database import Database
+        from core.database import Database
 
         db = Database()
         try:
@@ -124,7 +124,7 @@ def should_fetch_languages(repo,
     Boundary equality (``size == threshold``) still permits the fetch
     (the comparison is strict ``>``).
 
-    ``skip_forks`` (API_using.md §7.2): when True, /languages is never
+    ``skip_forks`` (documentation/API_using.md §7.2): when True, /languages is never
     fetched for forked repos — a fork mirrors its upstream, so the
     language breakdown carries little signal for similarity scoring.
     """
