@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -27,6 +28,8 @@ from pydantic import BaseModel
 
 from api.queries import (
     activity_timeline,
+    followers_history,
+    github_api_usage,
     language_options,
     list_users,
     overview_stats,
@@ -35,8 +38,8 @@ from api.queries import (
     status_distribution,
     user_profile,
 )
-from config import DAILY_FOLLOW_LIMIT
-from database import Database
+from core.config import DAILY_FOLLOW_LIMIT
+from core.database import Database
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -50,6 +53,7 @@ JOB_MODES = {
     "score": ["--score"],
     "follow": ["--follow"],
     "silent": ["--silent"],
+    "snapshot": ["--snapshot"],
 }
 
 app = FastAPI(title="GitHub Social Dashboard", version="0.1.0")
@@ -70,6 +74,14 @@ _job_processes: dict[int, subprocess.Popen] = {}
 _starting_jobs: set[int] = set()
 _job_lock = threading.Lock()
 _start_lock = threading.Lock()
+
+# Orphaned jobs (API restarted) that we have already SIGTERM'd — the bot
+# shuts down gracefully and self-reports its real outcome.  If a job is
+# still RUNNING after this grace window, it is force-marked FAILED so the
+# mode can be relaunched.  Generous because a SIGTERM'd bot may be partway
+# through a long scoring/collection cycle before it can exit.
+_orphan_sigterm_at: dict[int, float] = {}
+_ORPHAN_GRACE_SECONDS = 900
 
 
 def _db():
@@ -135,13 +147,17 @@ def _spawn_job(mode):
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"job_{job_id}.log"
         argv = [sys.executable, str(ROOT / "main.py")] + JOB_MODES[mode]
+        # Tell the bot which job_run row it belongs to so it can
+        # self-report its real outcome on exit (survives API restarts).
+        env = os.environ.copy()
+        env["GITHUB_SOCIAL_JOB_ID"] = str(job_id)
         with open(log_path, "w", encoding="utf-8") as logf:
             proc = subprocess.Popen(
                 argv,
                 cwd=str(ROOT),
                 stdout=logf,
                 stderr=subprocess.STDOUT,
-                env=os.environ.copy(),
+                env=env,
             )
     except Exception as exc:
         with _job_lock:
@@ -185,11 +201,28 @@ def _watch_job(job_id, proc, log_path):
             error = None
     db = _db()
     try:
-        db.finish_job(job_id, exit_code, error)
+        # The bot may already have self-reported its outcome (see
+        # main.py) — respect that, don't overwrite it.
+        current = db.get_job(job_id)
+        if current and current["status"] in ("RUNNING", "PENDING"):
+            db.finish_job(job_id, exit_code, error)
     finally:
         db.conn.close()
     with _job_lock:
         _job_processes.pop(job_id, None)
+
+
+def _finish_if_still_running(db, job, exit_code, error=None):
+    """Mark *job* finished only if it has not already resolved.
+
+    The bot subprocess self-reports its real outcome (main.py), so if it
+    committed SUCCESS/FAILED between our snapshot and this write, do not
+    clobber its verdict with a cleanup guess.
+    """
+    current = db.get_job(job["id"])
+    if current and current["status"] not in ("RUNNING", "PENDING"):
+        return
+    db.finish_job(job["id"], exit_code, error)
 
 
 def _cleanup_stale_jobs():
@@ -202,25 +235,61 @@ def _cleanup_stale_jobs():
 
     Jobs currently tracked by :data:`_job_processes` or still being
     started are skipped to avoid racing the watcher / spawn.
-    Orphaned jobs are terminated (SIGTERM — the CLI shuts down gracefully)
-    and marked FAILED so the mode can be relaunched.
+
+    For an orphaned job whose bot process is **still alive**, we send a
+    graceful SIGTERM but do NOT mark it FAILED: the bot finishes the
+    current unit of work and self-reports its real outcome (SUCCESS if it
+    completed) via ``GITHUB_SOCIAL_JOB_ID`` — so a job that actually did
+    its work is never shown as failed just because the API restarted.  If
+    the job is still RUNNING after :data:`_ORPHAN_GRACE_SECONDS`, it is
+    force-marked FAILED so the mode can be relaunched.
+
+    Only jobs whose process is **dead** (container killed it, spawn never
+    finished, or pid reused) are marked FAILED immediately — they cannot
+    self-report.
     """
     db = _db()
     try:
+        running = db.running_jobs()
         with _job_lock:
             tracked = set(_job_processes.keys()) | set(_starting_jobs)
-        for job in db.running_jobs():
+            running_ids = {job["id"] for job in running}
+            # Drop tracking for jobs that already resolved (self-reported
+            # or force-marked) so the dict doesn't grow unboundedly.
+            for stale_id in [i for i in _orphan_sigterm_at if i not in running_ids]:
+                _orphan_sigterm_at.pop(stale_id, None)
+        now = time.monotonic()
+        for job in running:
             if job["id"] in tracked:
                 continue
             pid = job.get("pid")
             if pid and _is_bot_process(pid):
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except OSError:
-                    pass
-            db.finish_job(
-                job["id"],
-                -1,
+                with _job_lock:
+                    first_signal = job["id"] not in _orphan_sigterm_at
+                    if first_signal:
+                        _orphan_sigterm_at[job["id"]] = now
+                    sig_time = _orphan_sigterm_at.get(job["id"])
+                if first_signal:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                    continue
+                if sig_time is not None and now - sig_time < _ORPHAN_GRACE_SECONDS:
+                    continue  # give the bot time to self-report
+                # Grace expired — the bot did not exit in time.
+                with _job_lock:
+                    _orphan_sigterm_at.pop(job["id"], None)
+                _finish_if_still_running(
+                    db, job, -1,
+                    error="Interrupted (job did not stop after restart).",
+                )
+                continue
+            # No live bot process — it cannot self-report.
+            with _job_lock:
+                _orphan_sigterm_at.pop(job["id"], None)
+            _finish_if_still_running(
+                db, job, -1,
                 error="Interrupted (API restarted or process died).",
             )
     finally:
@@ -239,9 +308,14 @@ def stats():
     db = _db()
     try:
         _cleanup_stale_jobs()
+        # Keep the request log small — the per-hour meter only needs
+        # recent history.
+        db.prune_api_requests()
         return {
             **overview_stats(db, DAILY_FOLLOW_LIMIT),
+            "github_usage": github_api_usage(db),
             "activity": activity_timeline(db, days=30),
+            "followers_history": followers_history(db, days=30),
             "status_distribution": status_distribution(db),
             "score_buckets": score_buckets(db),
             "recent_actions": recent_actions(db),
@@ -319,7 +393,7 @@ def languages():
 
 @app.get("/api/config")
 def config_view():
-    import config as cfg
+    import core.config as cfg
 
     return {
         "my_username": cfg.MY_USERNAME,

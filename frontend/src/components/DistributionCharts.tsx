@@ -12,7 +12,6 @@ import type { BucketCount, StatusCount } from "../types";
 import { STATUS_META, STATUS_ORDER } from "../status";
 
 const BUCKET_COLORS: Record<string, string> = {
-  unscored: "#8c959f",
   "1-19": "#c2973d",
   "20-39": "#bc4c00",
   "40-59": "#9a6700",
@@ -32,11 +31,13 @@ function statusColor(status: string): string {
 }
 
 export function StatusBars({ data }: { data: StatusCount[] }) {
-  const ordered = [...data].sort((a, b) => {
-    const ia = STATUS_ORDER.indexOf(a.status);
-    const ib = STATUS_ORDER.indexOf(b.status);
-    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-  });
+  // Always render every status in STATUS_ORDER (zero-filled), so columns
+  // stay consistent even when a status currently has no users.
+  const counts = new Map(data.map((d) => [d.status, d.count]));
+  const ordered = STATUS_ORDER.map((status) => ({
+    status,
+    count: counts.get(status) ?? 0,
+  }));
 
   return (
     <div className="h-[200px] w-full">

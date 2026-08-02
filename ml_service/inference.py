@@ -11,8 +11,8 @@ import os
 
 import torch
 
-from config import ML_MODEL_DIR
-from logger import get_logger
+from core.config import ML_MODEL_DIR
+from core.logger import get_logger
 
 log = get_logger(__name__)
 

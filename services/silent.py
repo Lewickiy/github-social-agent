@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from config import (
+from core.config import (
     DAILY_FOLLOW_LIMIT,
     ML_ENABLED,
     OWNER_FOLLOWER_SCAN_INTERVAL,
@@ -22,22 +22,31 @@ from config import (
     SILENT_FOLLOW_SCORE_THRESHOLD,
     SILENT_PRIORITIZE_SMALL,
     SILENT_REPO_CHECK_FRESHNESS_DAYS,
+    SKIP_FORK_LANGUAGES,
     SKIP_LANGS_FORK_SIZE_KB,
     SKIP_LANGS_MAX_SIZE_KB,
 )
-from collector import Collector
-from github_client import (
+from core.github_client import (
     GitHubAuthError,
     GitHubNetworkError,
+    GitHubNotModified,
     GitHubRateLimitError,
     LONG_HINT_THRESHOLD,
     first_wait_from_headers,
     should_fetch_languages,
 )
-from logger import get_logger
-from scorer import Scorer
+from core.logger import get_logger
+
+from .collector import Collector
+from .scorer import Scorer
 
 log = get_logger(__name__)
+
+# Serialises the follow-queue drain across parallel SilentRunner workers
+# (see SILENT_WORKERS) so two workers never follow the same user or
+# overshoot the daily limit.  Reentrant — _drain_follow_queue() calls
+# _follow_user() while both may be wrapped by the same lock.
+_FOLLOW_LOCK = threading.RLock()
 
 
 def _jitter(seconds, factor=0.3):
@@ -234,9 +243,10 @@ class SilentRunner:
             # ── Store full profile for ML ──
             self.db.store_full_profile(username, info)
 
-            # ── Fetch repos ──
+            # ── Fetch repos (ETag conditional — 304 = unchanged, free) ──
+            repos_etag = self.db.get_repos_etag(username)
             try:
-                repos = self.github.repos(username)
+                repos = self.github.repos(username, etag=repos_etag)
             except GitHubAuthError as exc:
                 self._abort_on_auth_error(exc)
                 return
@@ -250,6 +260,20 @@ class SilentRunner:
                 if self._handle_rate_limit(exc) == "shutdown":
                     return
                 continue
+            except GitHubNotModified:
+                # Repo list unchanged since last fetch — nothing new to
+                # collect.  Backfill any repos whose languages were missed
+                # in a previous aborted run, then refresh the user-level
+                # TTL so the user leaves the queue.
+                log.debug("[%d/%d] Repos for %s unchanged (304) — skipping", idx, total, username)
+                print(f"[{idx}/{total}] {username} (repos unchanged — skipped)")
+                self._backfill_missing_languages(username)
+                self.db.mark_repos_fetched(username)
+                return
+
+            # Persist the collection ETag for the next (free) 304.
+            if self.github.last_etag:
+                self.db.set_repos_etag(username, self.github.last_etag)
 
             for repo in repos:
                 if self._shutdown.is_set():
@@ -283,18 +307,22 @@ class SilentRunner:
                 # ── Heavy / fork filter: skip /languages for heavyweight
                 #    repos / large forks to avoid tripping GitHub's secondary
                 #    rate limit (abuse detection).  Controlled by
-                #    READ_HEAVY_FORK_LANGUAGES in config.py.
+                #    READ_HEAVY_FORK_LANGUAGES in config.py.  When
+                #    SKIP_FORK_LANGUAGES is True (default) /languages is
+                #    skipped for ALL forks (documentation/API_using.md §7.2).
                 _should_lang = should_fetch_languages(
                     repo,
                     fork_threshold_kb=SKIP_LANGS_FORK_SIZE_KB,
                     max_threshold_kb=SKIP_LANGS_MAX_SIZE_KB,
                     read_heavy_forks=READ_HEAVY_FORK_LANGUAGES,
+                    skip_forks=SKIP_FORK_LANGUAGES,
                 )
 
                 if _should_lang:
-                    # Languages
+                    # Languages (ETag conditional — 304 = unchanged, free)
+                    lang_etag = self.db.get_languages_etag(repo_id)
                     try:
-                        langs = self.github.repo_languages(username, repo_name)
+                        langs = self.github.repo_languages(username, repo_name, etag=lang_etag)
                     except GitHubAuthError as exc:
                         self._abort_on_auth_error(exc)
                         return
@@ -310,6 +338,16 @@ class SilentRunner:
                         # Rate-limited before completing this repo: leave it
                         # unmarked so it gets re-checked on the next run.
                         break
+                    except GitHubNotModified:
+                        # Languages unchanged — cached copy is still valid.
+                        log.debug("Silent: %s/%s languages unchanged (304) — cached", username, repo_name)
+                        print(f"      ⏭  Languages unchanged (304)")
+                        langs = None
+                    else:
+                        # Persist the fresh ETag so the next run is a free 304.
+                        if self.github.last_etag:
+                            self.db.set_languages_etag(repo_id, self.github.last_etag)
+
                     if langs:
                         if self.db.save_repository_languages(repo_id, langs):
                             print(f"      🔤 Languages saved: {', '.join(langs.keys())}")
@@ -352,6 +390,55 @@ class SilentRunner:
             self.db.mark_repos_fetched(username)
 
             break  # user done
+
+    def _backfill_missing_languages(self, username):
+        """Fetch languages for repos that never got them (last_checked_at NULL).
+
+        Called on the repos-304 fast-path: when the repo list is unchanged
+        we still want to complete language data for repos missed in a
+        previous aborted run (rate limit / network error mid-user), so
+        scoring stays accurate.  Forks are skipped when
+        ``SKIP_FORK_LANGUAGES`` is True.
+        """
+        missing = self.db.repos_needing_languages(
+            username, skip_forks=SKIP_FORK_LANGUAGES,
+        )
+        for repo_id, repo_name in missing:
+            if self._shutdown.is_set():
+                return
+            lang_etag = self.db.get_languages_etag(repo_id)
+            try:
+                langs = self.github.repo_languages(username, repo_name, etag=lang_etag)
+            except GitHubAuthError as exc:
+                self._abort_on_auth_error(exc)
+                return
+            except GitHubNetworkError as exc:
+                if self._handle_network_error(exc) == "shutdown":
+                    return
+                break
+            except GitHubRateLimitError as exc:
+                log.warning("Rate limit (%s) on langs %s/%s", exc.status_code, username, repo_name)
+                print(f"  ⚠ Rate limit ({exc.status_code})")
+                if self._handle_rate_limit(exc) == "shutdown":
+                    return
+                break
+            except GitHubNotModified:
+                langs = None
+            else:
+                if self.github.last_etag:
+                    self.db.set_languages_etag(repo_id, self.github.last_etag)
+            if langs:
+                if self.db.save_repository_languages(repo_id, langs):
+                    print(f"      🔤 Languages saved: {', '.join(langs.keys())}")
+            # Repo verified now (real fetch or free 304) — start per-repo TTL.
+            # Note: size is not stored in the DB, so this backfill may also
+            # fetch languages for heavy non-fork repos (>500 MB) that the
+            # size filter would normally skip — rare, and it marks them
+            # checked so it runs at most once per freshness window.
+            self.db.mark_repo_checked(repo_id)
+            # Keep the same stealth cadence as the normal per-repo loop.
+            if not self._sleep(SILENT_DELAY_BETWEEN_REQUESTS):
+                return
 
     # ------------------------------------------------------------------
     # Scoring (one user at a time)
@@ -448,7 +535,17 @@ class SilentRunner:
     # ------------------------------------------------------------------
 
     def _follow_user(self, username, score):
-        """Follow *username* if daily budget allows.  Returns True on success."""
+        """Follow *username* if daily budget allows.  Returns True on success.
+
+        Serialised across parallel silent workers via ``_FOLLOW_LOCK`` so
+        two workers never follow the same user concurrently or overshoot
+        the daily budget.
+        """
+        with _FOLLOW_LOCK:
+            return self._follow_user_unlocked(username, score)
+
+    def _follow_user_unlocked(self, username, score):
+        """Follow logic — run with ``_FOLLOW_LOCK`` already held."""
         done_today = self.db.today_follows()
         remaining = DAILY_FOLLOW_LIMIT - done_today
         if remaining <= 0:
@@ -522,13 +619,23 @@ class SilentRunner:
     # Main entry point
     # ------------------------------------------------------------------
 
-    def run(self):
+    def run(self, worker_index=0, worker_count=1):
         """Collect repos + score per user — all with stealth delays.
 
         Also periodically checks for new owner followers and processes
         them with priority.
+
+        Parameters
+        ----------
+        worker_index : int, optional
+            Zero-based index of this worker.  Used only when multiple
+            workers share the queue (SILENT_WORKERS > 1).
+        worker_count : int, optional
+            Total number of parallel workers.  The queue is split as
+            ``rows[worker_index::worker_count]`` — each worker handles a
+            disjoint slice, so users are never processed twice.
         """
-        log.info("Silent mode started.")
+        log.info("Silent mode started (worker %d/%d).", worker_index + 1, worker_count)
 
         # Load owner data once for the similarity comparison
         owner_username = self.db.get_owner()
@@ -545,6 +652,9 @@ class SilentRunner:
         rows = self.db.users_for_silent_processing(
             prioritize_small=SILENT_PRIORITIZE_SMALL,
         )
+        # Split the queue across parallel workers — disjoint slices.
+        if worker_count > 1:
+            rows = rows[worker_index::worker_count]
 
         total = len(rows)
         print(f"Processing {total} users (silent) ...")
@@ -564,8 +674,12 @@ class SilentRunner:
             except Exception:
                 log.exception("Failed to load ML model")
 
-        # ── Periodic owner follower scanner ──
-        periodic_collector = Collector(self.db, self.github, self._shutdown)
+        # ── Periodic owner follower scanner (worker 0 only — other
+        #    workers skip it to avoid duplicate owner scans) ──
+        periodic_collector = (
+            Collector(self.db, self.github, self._shutdown)
+            if worker_index == 0 else None
+        )
         owner_scan_counter = 0
 
         for idx, (username,) in enumerate(rows, 1):
@@ -576,7 +690,10 @@ class SilentRunner:
             # ═══════════════════════════════════════════════════════════
             # PERIODIC SCAN: check for new owner followers every N users
             # ═══════════════════════════════════════════════════════════
-            if owner_scan_counter >= OWNER_FOLLOWER_SCAN_INTERVAL:
+            if (
+                periodic_collector is not None
+                and owner_scan_counter >= OWNER_FOLLOWER_SCAN_INTERVAL
+            ):
                 owner_scan_counter = 0
                 new_followers = periodic_collector.scan_owner_followers(verbose=False)
                 if new_followers:

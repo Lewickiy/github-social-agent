@@ -1,7 +1,7 @@
 import time
 
-from config import DAILY_FOLLOW_LIMIT, FOLLOW_DELAY
-from logger import get_logger
+from core.config import DAILY_FOLLOW_LIMIT, FOLLOW_DELAY
+from core.logger import get_logger
 
 log = get_logger(__name__)
 

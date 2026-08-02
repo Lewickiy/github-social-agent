@@ -14,6 +14,7 @@ import { LanguageDots } from "../components/LanguageDots";
 import { StatusBadge } from "../components/StatusBadge";
 import ProfileDrawer from "../components/ProfileDrawer";
 import { usePolling } from "../hooks/usePolling";
+import { useRefresh } from "../refresh";
 
 type SortKey = "score" | "followers" | "repos" | "followed_at" | "created_at";
 
@@ -42,6 +43,7 @@ const ML_FILTERS = [
 ];
 
 export default function UsersPage() {
+  const { intervalMs } = useRefresh();
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
   const [status, setStatus] = useState("");
@@ -100,8 +102,8 @@ export default function UsersPage() {
     fetchUsers();
   }, [fetchUsers]);
 
-  // Auto-refresh every 5 minutes while the table is open.
-  usePolling(fetchUsers, 5 * 60 * 1000);
+  // Auto-refresh on the shared cadence (default 1 min, adjustable in Management).
+  usePolling(fetchUsers, intervalMs);
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 

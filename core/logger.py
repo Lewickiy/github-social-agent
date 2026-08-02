@@ -14,7 +14,7 @@ land in the file but stay off the console.
 
 import logging
 import os
-from config import LOG_FILE
+from core.config import LOG_FILE
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -28,6 +28,9 @@ def get_logger(name: str) -> logging.Logger:
     logger.setLevel(logging.DEBUG)
 
     # --- File handler: everything goes to the log file ---
+    # Ensure the parent directory exists (e.g. logs/ is gitignored and
+    # may be missing on a fresh checkout; FileHandler does not create it).
+    os.makedirs(os.path.dirname(os.path.abspath(LOG_FILE)), exist_ok=True)
     fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(

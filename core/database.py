@@ -1,8 +1,8 @@
 import json
 import re
 import sqlite3
-from datetime import datetime, timezone
-from config import (
+from datetime import datetime, timedelta, timezone
+from core.config import (
     DATABASE,
     CURRENT_SCORE_VERSION,
     REPO_FRESHNESS_DAYS,
@@ -30,6 +30,10 @@ class Database:
 
     def __init__(self, path=None):
         self.conn = sqlite3.connect(path or DATABASE)
+        # Several bot threads write to the same DB concurrently (parallel
+        # silent workers + background workers).  Without a busy timeout,
+        # a write collision on WAL raises "database is locked" instantly.
+        self.conn.execute("PRAGMA busy_timeout=5000")
 
     # --------------------------------------------------
     # Users
@@ -156,7 +160,10 @@ class Database:
           - deleted users,
           - users whose repos were fetched within REPO_FRESHNESS_DAYS,
           - users already scored with the current algorithm version
-            within SCORE_FRESHNESS_DAYS.
+            within SCORE_FRESHNESS_DAYS **and whose repos were actually
+            collected** (repos_fetched_at IS NOT NULL).  A score stamped
+            without repo data (repos_fetched_at IS NULL) is not
+            trustworthy, so such users stay in the queue.
 
         Ordered by:
           1. Owner followers (discovered_from = 'owner_followers') — priority,
@@ -179,6 +186,7 @@ class Database:
                   u.score_version = ?
                   AND u.scored_at IS NOT NULL
                   AND u.scored_at >= datetime('now', ?)
+                  AND u.repos_fetched_at IS NOT NULL
               )
             ORDER BY
                 CASE WHEN u.discovered_from = 'owner_followers' THEN 0 ELSE 1 END,
@@ -248,7 +256,18 @@ class Database:
     # --------------------------------------------------
 
     def get_user_cached_info(self, username):
-        """Return cached user profile from the users table, or None."""
+        """Return cached user profile from the users table, or None.
+
+        ``public_repos`` / ``followers`` are returned as ``None`` when no
+        reliable profile data exists yet, so callers fall back to an API
+        fetch instead of trusting possibly-stale summary columns.
+
+        A full ``github_profile_json`` (written by ``store_full_profile``
+        after a real API round-trip) is the source of truth: when present,
+        its ``public_repos`` / ``followers`` take precedence.  When absent
+        the summary columns are NOT trusted — a previous scoring pass may
+        have stamped zeros into them without ever fetching the user.
+        """
         row = self.conn.execute(
             """
             SELECT username, public_repos, followers, bio, company,
@@ -263,8 +282,8 @@ class Database:
 
         result = {
             "login": row[0],
-            "public_repos": row[1] or 0,
-            "followers": row[2] or 0,
+            "public_repos": row[1],
+            "followers": row[2],
             "bio": row[3],
             "company": row[4],
             "score": row[5],
@@ -272,20 +291,29 @@ class Database:
             "status": row[7],
         }
 
-        # If we have a cached full profile, merge the extra fields
-        if row[8]:
-            try:
-                full = json.loads(row[8])
-                # Merge fields that aren't already in the cached info
-                for key in (
-                    "following", "public_gists", "blog", "location",
-                    "email", "hireable", "name", "type",
-                    "twitter_username", "created_at",
-                ):
-                    if key in full:
-                        result[key] = full[key]
-            except (json.JSONDecodeError, TypeError):
-                pass
+        # Only a full github_profile_json (from a real API round-trip) is
+        # trustworthy.  Without it the summary columns may have been
+        # stamped 0 by an earlier unreliable scoring pass, so signal
+        # "no data" (None) and let callers re-fetch from the API.
+        if not row[8]:
+            result["public_repos"] = None
+            result["followers"] = None
+            return result
+
+        try:
+            full = json.loads(row[8])
+            # The JSON is the raw API response — its values win.
+            for key in (
+                "public_repos", "followers", "following", "public_gists",
+                "blog", "location", "email", "hireable", "name", "type",
+                "twitter_username", "created_at",
+            ):
+                if key in full:
+                    result[key] = full[key]
+        except (json.JSONDecodeError, TypeError):
+            # Corrupt JSON — treat as no reliable profile data.
+            result["public_repos"] = None
+            result["followers"] = None
 
         return result
 
@@ -355,6 +383,69 @@ class Database:
         self.conn.commit()
 
     # --------------------------------------------------
+    # ETag cache (conditional requests — 304 is free)
+    # --------------------------------------------------
+
+    def get_repos_etag(self, username):
+        """Return the cached ETag for a user's repo list, or None."""
+        row = self.conn.execute(
+            "SELECT repos_etag FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_repos_etag(self, username, etag):
+        """Persist the ETag of the last ``/users/{user}/repos`` response."""
+        self.conn.execute(
+            "UPDATE users SET repos_etag = ? WHERE username = ?",
+            (etag, username),
+        )
+        self.conn.commit()
+
+    def get_languages_etag(self, repo_id):
+        """Return the cached ETag for a repo's language breakdown, or None."""
+        row = self.conn.execute(
+            "SELECT languages_etag FROM repositories WHERE id = ?",
+            (repo_id,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_languages_etag(self, repo_id, etag):
+        """Persist the ETag of the last ``/repos/{owner}/{repo}/languages`` response."""
+        self.conn.execute(
+            "UPDATE repositories SET languages_etag = ? WHERE id = ?",
+            (etag, repo_id),
+        )
+        self.conn.commit()
+
+    def repos_needing_languages(self, username, skip_forks=True):
+        """Return ``(id, name)`` rows of repos whose languages were never fetched.
+
+        Used by the repos-304 fast-path: when the repo list is unchanged we
+        still backfill language data for repos missed in a previous aborted
+        run (``last_checked_at IS NULL``), so scoring data stays complete.
+        Forks are excluded when *skip_forks* is True (their languages are
+        intentionally never fetched — SKIP_FORK_LANGUAGES).
+        """
+        if skip_forks:
+            rows = self.conn.execute(
+                """
+                SELECT id, name FROM repositories
+                WHERE user_id = ? AND last_checked_at IS NULL AND is_fork = 0
+                """,
+                (username,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT id, name FROM repositories
+                WHERE user_id = ? AND last_checked_at IS NULL
+                """,
+                (username,),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    # --------------------------------------------------
     # Followers count (incremental scan detection)
     # --------------------------------------------------
 
@@ -377,6 +468,125 @@ class Database:
             WHERE username = ?
             """,
             (count, now, username),
+        )
+        self.conn.commit()
+
+    # --------------------------------------------------
+    # Historical snapshots (daily mutable-profile data)
+    # --------------------------------------------------
+
+    def store_user_snapshot(self, username, followers=None, following=None,
+                            public_repos=None, public_gists=None, extra=None):
+        """Record today's snapshot for *username* (upsert per day).
+
+        At most one row per (username, snapshot_date) — re-running the
+        snapshot on the same day updates that row.  Works for any user,
+        so snapshots can later be accumulated for everyone, not just the
+        owner.
+
+        *extra* is an optional dict of other mutable profile fields
+        (name, company, bio, location, …) stored as JSON for future
+        analytics.
+
+        ``snapshot_date`` is the **UTC** date so it matches the rest of
+        the codebase (Docker containers default to UTC — "noon" is
+        12:00 UTC there).
+        """
+        today = datetime.now(timezone.utc).date().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            """
+            INSERT INTO user_snapshots (
+                username, snapshot_date, followers_count, following_count,
+                public_repos_count, public_gists_count, extra_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, snapshot_date) DO UPDATE SET
+                followers_count    = COALESCE(excluded.followers_count,
+                                             user_snapshots.followers_count),
+                following_count    = COALESCE(excluded.following_count,
+                                             user_snapshots.following_count),
+                public_repos_count = COALESCE(excluded.public_repos_count,
+                                             user_snapshots.public_repos_count),
+                public_gists_count = COALESCE(excluded.public_gists_count,
+                                             user_snapshots.public_gists_count),
+                extra_json         = COALESCE(excluded.extra_json,
+                                             user_snapshots.extra_json),
+                updated_at         = excluded.updated_at
+            """,
+            (
+                username, today, followers, following, public_repos,
+                public_gists, json.dumps(extra, ensure_ascii=False) if extra else None,
+                now, now,
+            ),
+        )
+        self.conn.commit()
+
+    def get_user_snapshots(self, username, since_date=None):
+        """Return daily snapshots for *username* (oldest first).
+
+        ``since_date`` is an ISO date string (YYYY-MM-DD); None = all.
+        Returns a list of dicts.
+        """
+        sql = (
+            "SELECT snapshot_date, followers_count, following_count, "
+            "public_repos_count, public_gists_count, extra_json "
+            "FROM user_snapshots WHERE username = ?"
+        )
+        params = [username]
+        if since_date:
+            sql += " AND snapshot_date >= ?"
+            params.append(since_date)
+        sql += " ORDER BY snapshot_date"
+        rows = self.conn.execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            extra = None
+            if r[5]:
+                try:
+                    extra = json.loads(r[5])
+                except (json.JSONDecodeError, TypeError):
+                    extra = None
+            out.append({
+                "date": r[0],
+                "followers_count": r[1],
+                "following_count": r[2],
+                "public_repos_count": r[3],
+                "public_gists_count": r[4],
+                "extra": extra,
+            })
+        return out
+
+    # --------------------------------------------------
+    # GitHub API usage meter
+    # --------------------------------------------------
+
+    def record_api_request(self, endpoint, status_code=None):
+        """Append one GitHub API round-trip to the request log.
+
+        Called from github_client on every real HTTP call to api.github.com
+        (including 304s) so the dashboard can show a live per-hour request
+        rate.  Uses UTC ISO timestamps, consistent with the rest of the DB.
+        """
+        self.conn.execute(
+            "INSERT INTO github_api_requests (endpoint, status_code, created_at) "
+            "VALUES (?, ?, ?)",
+            (endpoint, status_code, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def prune_api_requests(self, older_than_hours=48):
+        """Delete request-log rows older than *older_than_hours*.
+
+        Keeps the table small — the per-hour meter only ever needs the last
+        few hours of data.  Called opportunistically by the API server.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+        ).isoformat()
+        self.conn.execute(
+            "DELETE FROM github_api_requests WHERE created_at < ?",
+            (cutoff,),
         )
         self.conn.commit()
 

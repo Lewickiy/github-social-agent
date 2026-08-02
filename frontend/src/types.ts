@@ -13,6 +13,13 @@ export interface ActivityPoint {
   count: number;
 }
 
+export interface FollowerHistoryPoint {
+  date: string;
+  followers: number;
+  following: number | null;
+  public_repos: number | null;
+}
+
 export interface RecentAction {
   username: string;
   action: string;
@@ -31,7 +38,16 @@ export interface Job {
   created_at: string | null;
 }
 
+export interface GitHubUsage {
+  requests_last_hour: number;
+  requests_today: number;
+  requests_total: number;
+  rate_limit: number;
+  percent_last_hour: number;
+}
+
 export interface Stats {
+  github_usage: GitHubUsage;
   totals: {
     total: number;
     scored: number;
@@ -47,6 +63,7 @@ export interface Stats {
   owner: string | null;
   followers_count: number | null;
   activity: ActivityPoint[];
+  followers_history: FollowerHistoryPoint[];
   status_distribution: StatusCount[];
   score_buckets: BucketCount[];
   recent_actions: RecentAction[];

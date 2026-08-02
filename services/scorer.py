@@ -14,8 +14,8 @@ Score breakdown (0-100):
 
 import time
 
-from config import ML_ENABLED
-from logger import get_logger
+from core.config import ML_ENABLED
+from core.logger import get_logger
 
 log = get_logger(__name__)
 

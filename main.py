@@ -10,6 +10,7 @@ Usage:
     python main.py --follow            Follow top-scored users (respects daily limit)
     python main.py --top               Show top 50 unscored users
     python main.py --profile USER      Show developer profile for USER
+    python main.py --snapshot          Record today's profile snapshot now
     python main.py --migrate           Apply pending database migrations
     python main.py --migrate-status    Show migration status
 """
@@ -19,17 +20,18 @@ import signal
 import sys
 import threading
 
-from collector import Collector
-from company_worker import CompanyWorker
-from config import MY_USERNAME
-from database import Database
-from follow_engine import FollowEngine
-from followback_check_worker import FollowbackCheckWorker
-from github_client import GithubClient
-from logger import get_logger
-from scorer import Scorer
-from silent import SilentRunner
+from core.config import MY_USERNAME, SILENT_WORKERS
+from core.database import Database
+from core.github_client import GithubClient
+from core.logger import get_logger
+from services.collector import Collector
+from services.follow_engine import FollowEngine
+from services.scorer import Scorer
+from services.silent import SilentRunner
+from workers.company_worker import CompanyWorker
+from workers.followback_check_worker import FollowbackCheckWorker
 from workers.ml_trainer import MLTrainerWorker
+from workers.snapshot_worker import SnapshotWorker, take_snapshot_now
 
 log = get_logger(__name__)
 
@@ -94,8 +96,81 @@ def _print_profile(profile):
     print()
 
 
+def _report_job_outcome(job_id, error=None):
+    """Persist this process's real job outcome if it was dashboard-spawned.
+
+    The API normally records the outcome via a watcher thread, but if the
+    API restarted mid-job the watcher is gone — the bot process itself is
+    the only one that knows whether it actually completed its work.
+    Uses a fresh Database connection (the main one is being torn down).
+    """
+    if not job_id:
+        return
+    try:
+        db = Database()
+        try:
+            job_id = int(job_id)
+            current = db.get_job(job_id)
+            if not current or current["status"] == "SUCCESS":
+                return
+            # This runs in the bot's finally, BEFORE the process exits, so
+            # the watcher (proc.wait() → finish_job) can never have written
+            # yet.  A FAILED row at this point can only be a cleanup
+            # force-mark from an API restart — the bot's own verdict is the
+            # source of truth, so overwrite it (a long-running job that
+            # eventually completed must show SUCCESS).
+            # exit_code 0 → SUCCESS, -1 → FAILED (with the real error).
+            db.finish_job(job_id, -1 if error else 0, error=error)
+        finally:
+            db.conn.close()
+    except Exception:
+        log.exception("Failed to self-report job %s outcome", job_id)
+
+
+def _run_silent(db, github, shutdown_event):
+    """Run silent mode, optionally with several parallel workers.
+
+    When ``SILENT_WORKERS`` > 1, each worker gets its own Database and
+    GithubClient (SQLite connections are not thread-safe) and processes
+    a disjoint slice of the user queue, so the total GitHub request rate
+    scales with the number of workers while per-user pacing is unchanged.
+    """
+    n = SILENT_WORKERS
+    if n <= 1:
+        SilentRunner(db, github, shutdown_event=shutdown_event).run()
+        return
+
+    log.info("Silent mode: starting %d parallel workers", n)
+
+    def _worker(i):
+        wdb = Database()
+        try:
+            wgh = GithubClient()
+            SilentRunner(wdb, wgh, shutdown_event=shutdown_event).run(
+                worker_index=i, worker_count=n,
+            )
+        except Exception:
+            log.exception("Silent worker %d failed unexpectedly", i)
+        finally:
+            wdb.conn.close()
+
+    threads = [
+        threading.Thread(target=_worker, args=(i,), daemon=True,
+                         name=f"SilentWorker-{i}")
+        for i in range(n)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
 def main():
     _setup_signals()
+
+    # Job launched from the dashboard — the API passes its job_run id so
+    # the bot can record the true outcome on exit (survives API restarts).
+    job_id = os.environ.get("GITHUB_SOCIAL_JOB_ID")
 
     # Ensure migrations have been applied before any DB operation
     if "--migrate" not in sys.argv and "--migrate-status" not in sys.argv and "--help" not in sys.argv:
@@ -126,6 +201,7 @@ def main():
     company_worker = None
     followback_worker = None
     ml_worker = None
+    snapshot_worker = None
     if long_running & set(sys.argv):
         company_worker = CompanyWorker(_shutdown)
         company_worker.start()
@@ -133,13 +209,16 @@ def main():
         followback_worker.start()
         ml_worker = MLTrainerWorker(_shutdown)
         ml_worker.start()
+        snapshot_worker = SnapshotWorker(_shutdown)
+        snapshot_worker.start()
 
+    job_error = None
     try:
         if "--collect-self" in sys.argv:
             Collector(db, github, shutdown_event=_shutdown).collect_self()
 
         elif "--silent" in sys.argv:
-            SilentRunner(db, github, shutdown_event=_shutdown).run()
+            _run_silent(db, github, _shutdown)
 
         elif "--collect-users-rep" in sys.argv:
             Collector(db, github, shutdown_event=_shutdown).collect_repos()
@@ -172,12 +251,17 @@ def main():
                 sys.exit(1)
             _print_profile(profile)
 
+        elif "--snapshot" in sys.argv:
+            print("Recording today's profile snapshot ...")
+            take_snapshot_now(db, github)
+            print("Snapshot cycle finished.")
+
         elif "--migrate" in sys.argv:
-            from migrate import migrate
+            from migrations.runner import migrate
             migrate()
 
         elif "--migrate-status" in sys.argv:
-            from migrate import status
+            from migrations.runner import status
             status()
 
         else:
@@ -193,11 +277,13 @@ Usage:
     python main.py --follow            Follow top-scored users
     python main.py --top               Show top 50 users
     python main.py --profile USER      Show developer profile
+    python main.py --snapshot          Record today's profile snapshot now
     python main.py --migrate           Apply pending migrations
     python main.py --migrate-status    Show migration status\
 """
             )
     except Exception as exc:
+        job_error = f"{type(exc).__name__}: {exc}"
         log.critical("Unhandled exception — %s: %s", type(exc).__name__, exc, exc_info=True)
         print(f"\n❌ Unexpected error: {exc}")
         print("   Shutting down gracefully...")
@@ -205,6 +291,7 @@ Usage:
         log.info("Shutting down — committing and closing database.")
         db.conn.commit()
         db.conn.close()
+        _report_job_outcome(job_id, error=job_error)
 
 
 if __name__ == "__main__":
