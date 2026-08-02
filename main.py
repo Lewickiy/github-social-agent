@@ -20,7 +20,7 @@ import signal
 import sys
 import threading
 
-from core.config import MY_USERNAME
+from core.config import MY_USERNAME, SILENT_WORKERS
 from core.database import Database
 from core.github_client import GithubClient
 from core.logger import get_logger
@@ -127,6 +127,44 @@ def _report_job_outcome(job_id, error=None):
         log.exception("Failed to self-report job %s outcome", job_id)
 
 
+def _run_silent(db, github, shutdown_event):
+    """Run silent mode, optionally with several parallel workers.
+
+    When ``SILENT_WORKERS`` > 1, each worker gets its own Database and
+    GithubClient (SQLite connections are not thread-safe) and processes
+    a disjoint slice of the user queue, so the total GitHub request rate
+    scales with the number of workers while per-user pacing is unchanged.
+    """
+    n = SILENT_WORKERS
+    if n <= 1:
+        SilentRunner(db, github, shutdown_event=shutdown_event).run()
+        return
+
+    log.info("Silent mode: starting %d parallel workers", n)
+
+    def _worker(i):
+        wdb = Database()
+        try:
+            wgh = GithubClient()
+            SilentRunner(wdb, wgh, shutdown_event=shutdown_event).run(
+                worker_index=i, worker_count=n,
+            )
+        except Exception:
+            log.exception("Silent worker %d failed unexpectedly", i)
+        finally:
+            wdb.conn.close()
+
+    threads = [
+        threading.Thread(target=_worker, args=(i,), daemon=True,
+                         name=f"SilentWorker-{i}")
+        for i in range(n)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
 def main():
     _setup_signals()
 
@@ -180,7 +218,7 @@ def main():
             Collector(db, github, shutdown_event=_shutdown).collect_self()
 
         elif "--silent" in sys.argv:
-            SilentRunner(db, github, shutdown_event=_shutdown).run()
+            _run_silent(db, github, _shutdown)
 
         elif "--collect-users-rep" in sys.argv:
             Collector(db, github, shutdown_event=_shutdown).collect_repos()

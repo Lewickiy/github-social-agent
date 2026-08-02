@@ -42,6 +42,12 @@ from .scorer import Scorer
 
 log = get_logger(__name__)
 
+# Serialises the follow-queue drain across parallel SilentRunner workers
+# (see SILENT_WORKERS) so two workers never follow the same user or
+# overshoot the daily limit.  Reentrant — _drain_follow_queue() calls
+# _follow_user() while both may be wrapped by the same lock.
+_FOLLOW_LOCK = threading.RLock()
+
 
 def _jitter(seconds, factor=0.3):
     """Add ±factor jitter to *seconds* to look more natural.
@@ -529,7 +535,17 @@ class SilentRunner:
     # ------------------------------------------------------------------
 
     def _follow_user(self, username, score):
-        """Follow *username* if daily budget allows.  Returns True on success."""
+        """Follow *username* if daily budget allows.  Returns True on success.
+
+        Serialised across parallel silent workers via ``_FOLLOW_LOCK`` so
+        two workers never follow the same user concurrently or overshoot
+        the daily budget.
+        """
+        with _FOLLOW_LOCK:
+            return self._follow_user_unlocked(username, score)
+
+    def _follow_user_unlocked(self, username, score):
+        """Follow logic — run with ``_FOLLOW_LOCK`` already held."""
         done_today = self.db.today_follows()
         remaining = DAILY_FOLLOW_LIMIT - done_today
         if remaining <= 0:
@@ -603,13 +619,23 @@ class SilentRunner:
     # Main entry point
     # ------------------------------------------------------------------
 
-    def run(self):
+    def run(self, worker_index=0, worker_count=1):
         """Collect repos + score per user — all with stealth delays.
 
         Also periodically checks for new owner followers and processes
         them with priority.
+
+        Parameters
+        ----------
+        worker_index : int, optional
+            Zero-based index of this worker.  Used only when multiple
+            workers share the queue (SILENT_WORKERS > 1).
+        worker_count : int, optional
+            Total number of parallel workers.  The queue is split as
+            ``rows[worker_index::worker_count]`` — each worker handles a
+            disjoint slice, so users are never processed twice.
         """
-        log.info("Silent mode started.")
+        log.info("Silent mode started (worker %d/%d).", worker_index + 1, worker_count)
 
         # Load owner data once for the similarity comparison
         owner_username = self.db.get_owner()
@@ -626,6 +652,9 @@ class SilentRunner:
         rows = self.db.users_for_silent_processing(
             prioritize_small=SILENT_PRIORITIZE_SMALL,
         )
+        # Split the queue across parallel workers — disjoint slices.
+        if worker_count > 1:
+            rows = rows[worker_index::worker_count]
 
         total = len(rows)
         print(f"Processing {total} users (silent) ...")
@@ -645,8 +674,12 @@ class SilentRunner:
             except Exception:
                 log.exception("Failed to load ML model")
 
-        # ── Periodic owner follower scanner ──
-        periodic_collector = Collector(self.db, self.github, self._shutdown)
+        # ── Periodic owner follower scanner (worker 0 only — other
+        #    workers skip it to avoid duplicate owner scans) ──
+        periodic_collector = (
+            Collector(self.db, self.github, self._shutdown)
+            if worker_index == 0 else None
+        )
         owner_scan_counter = 0
 
         for idx, (username,) in enumerate(rows, 1):
@@ -657,7 +690,10 @@ class SilentRunner:
             # ═══════════════════════════════════════════════════════════
             # PERIODIC SCAN: check for new owner followers every N users
             # ═══════════════════════════════════════════════════════════
-            if owner_scan_counter >= OWNER_FOLLOWER_SCAN_INTERVAL:
+            if (
+                periodic_collector is not None
+                and owner_scan_counter >= OWNER_FOLLOWER_SCAN_INTERVAL
+            ):
                 owner_scan_counter = 0
                 new_followers = periodic_collector.scan_owner_followers(verbose=False)
                 if new_followers:

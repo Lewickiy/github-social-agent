@@ -98,6 +98,12 @@ SILENT_DELAY_BETWEEN_REQUESTS = 1   # was 3 (throttled to avoid rate-limit)
 SILENT_DELAY_BETWEEN_SCORES = 1  # pause between scoring users
 SILENT_DELAY_BETWEEN_FOLLOWS = 2  # pause between follow actions in silent mode
 
+# Number of parallel workers that process the silent-mode queue.
+# 1 = original single-threaded behaviour; 2 roughly doubles the request
+# rate (~1200 → ~2400 req/h) while staying far below GitHub's limits
+# (primary 5000 req/h, secondary 900 pts/min/endpoint).
+SILENT_WORKERS = 2
+
 # =====================================================
 # FOLLOW SCORING
 # =====================================================

@@ -30,6 +30,10 @@ class Database:
 
     def __init__(self, path=None):
         self.conn = sqlite3.connect(path or DATABASE)
+        # Several bot threads write to the same DB concurrently (parallel
+        # silent workers + background workers).  Without a busy timeout,
+        # a write collision on WAL raises "database is locked" instantly.
+        self.conn.execute("PRAGMA busy_timeout=5000")
 
     # --------------------------------------------------
     # Users
@@ -156,7 +160,10 @@ class Database:
           - deleted users,
           - users whose repos were fetched within REPO_FRESHNESS_DAYS,
           - users already scored with the current algorithm version
-            within SCORE_FRESHNESS_DAYS.
+            within SCORE_FRESHNESS_DAYS **and whose repos were actually
+            collected** (repos_fetched_at IS NOT NULL).  A score stamped
+            without repo data (repos_fetched_at IS NULL) is not
+            trustworthy, so such users stay in the queue.
 
         Ordered by:
           1. Owner followers (discovered_from = 'owner_followers') — priority,
@@ -179,6 +186,7 @@ class Database:
                   u.score_version = ?
                   AND u.scored_at IS NOT NULL
                   AND u.scored_at >= datetime('now', ?)
+                  AND u.repos_fetched_at IS NOT NULL
               )
             ORDER BY
                 CASE WHEN u.discovered_from = 'owner_followers' THEN 0 ELSE 1 END,
@@ -248,7 +256,18 @@ class Database:
     # --------------------------------------------------
 
     def get_user_cached_info(self, username):
-        """Return cached user profile from the users table, or None."""
+        """Return cached user profile from the users table, or None.
+
+        ``public_repos`` / ``followers`` are returned as ``None`` when no
+        reliable profile data exists yet, so callers fall back to an API
+        fetch instead of trusting possibly-stale summary columns.
+
+        A full ``github_profile_json`` (written by ``store_full_profile``
+        after a real API round-trip) is the source of truth: when present,
+        its ``public_repos`` / ``followers`` take precedence.  When absent
+        the summary columns are NOT trusted — a previous scoring pass may
+        have stamped zeros into them without ever fetching the user.
+        """
         row = self.conn.execute(
             """
             SELECT username, public_repos, followers, bio, company,
@@ -263,8 +282,8 @@ class Database:
 
         result = {
             "login": row[0],
-            "public_repos": row[1] or 0,
-            "followers": row[2] or 0,
+            "public_repos": row[1],
+            "followers": row[2],
             "bio": row[3],
             "company": row[4],
             "score": row[5],
@@ -272,20 +291,29 @@ class Database:
             "status": row[7],
         }
 
-        # If we have a cached full profile, merge the extra fields
-        if row[8]:
-            try:
-                full = json.loads(row[8])
-                # Merge fields that aren't already in the cached info
-                for key in (
-                    "following", "public_gists", "blog", "location",
-                    "email", "hireable", "name", "type",
-                    "twitter_username", "created_at",
-                ):
-                    if key in full:
-                        result[key] = full[key]
-            except (json.JSONDecodeError, TypeError):
-                pass
+        # Only a full github_profile_json (from a real API round-trip) is
+        # trustworthy.  Without it the summary columns may have been
+        # stamped 0 by an earlier unreliable scoring pass, so signal
+        # "no data" (None) and let callers re-fetch from the API.
+        if not row[8]:
+            result["public_repos"] = None
+            result["followers"] = None
+            return result
+
+        try:
+            full = json.loads(row[8])
+            # The JSON is the raw API response — its values win.
+            for key in (
+                "public_repos", "followers", "following", "public_gists",
+                "blog", "location", "email", "hireable", "name", "type",
+                "twitter_username", "created_at",
+            ):
+                if key in full:
+                    result[key] = full[key]
+        except (json.JSONDecodeError, TypeError):
+            # Corrupt JSON — treat as no reliable profile data.
+            result["public_repos"] = None
+            result["followers"] = None
 
         return result
 
