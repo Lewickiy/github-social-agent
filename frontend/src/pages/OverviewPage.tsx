@@ -105,13 +105,13 @@ export default function OverviewPage() {
           label="Users discovered"
           value={t.total}
           icon={<Users size={16} />}
-          sub={`${t.new} new in queue`}
+          sub={`${t.queue.toLocaleString()} awaiting processing`}
         />
         <StatCard
           label="Scored"
           value={t.scored}
           icon={<Target size={16} />}
-          sub={`${t.total > 0 ? Math.round((t.scored / t.total) * 100) : 0}% of pipeline`}
+          sub={`${t.total > 0 ? Math.round((t.scored / t.total) * 100) : 0}% of pipeline · ${t.scored_positive.toLocaleString()} with score > 0`}
         />
         <StatCard
           label="Followed"

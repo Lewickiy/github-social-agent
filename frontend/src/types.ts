@@ -51,7 +51,8 @@ export interface Stats {
   totals: {
     total: number;
     scored: number;
-    new: number;
+    scored_positive: number;
+    queue: number;
     followed: number;
     followbacks: number;
     unfollowed_after_mutual: number;
@@ -72,7 +73,7 @@ export interface Stats {
 
 export interface UserRow {
   username: string;
-  score: number;
+  score: number | null;
   followers: number;
   public_repos: number;
   status: string;
@@ -113,7 +114,7 @@ export interface CompanyRef {
 
 export interface UserProfile {
   username: string;
-  score: number;
+  score: number | null;
   public_repos: number;
   followers: number;
   bio: string | null;

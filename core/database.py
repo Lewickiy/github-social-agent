@@ -108,11 +108,14 @@ class Database:
         self.conn.commit()
 
     def top_users(self, limit):
+        # NULL scores (users without collected repos) are excluded — they
+        # carry no meaningful ranking and ``--follow`` logs them via %d.
         rows = self.conn.execute(
             """
             SELECT username, score
             FROM users
             WHERE status = 'NEW'
+              AND score IS NOT NULL
             ORDER BY score DESC
             LIMIT ?
             """,
@@ -123,10 +126,16 @@ class Database:
     def unscored_users(self):
         """Return usernames that need (re-)scoring.
 
+        Only users whose repositories were actually collected
+        (``repos_fetched_at IS NOT NULL``) are eligible — a score computed
+        without repo data is untrustworthy, so users still awaiting repo
+        collection are left for the silent-mode queue instead of being
+        scored blind.
+
         A user needs scoring when any of these is true:
           - never scored  (score = 0 AND scored_at IS NULL),  OR
           - score_version is behind the current algorithm version,  OR
-          - has no repository data yet (repos not collected),  OR
+          - has no repository rows (0 public repos),  OR
           - repos were collected AFTER the last scoring (stale score).
 
         The owner and deleted users are excluded.
@@ -136,6 +145,7 @@ class Database:
             SELECT u.username FROM users u
             WHERE u.owner = 0
               AND u.status != 'DELETED'
+              AND u.repos_fetched_at IS NOT NULL
               AND (   (u.score = 0 AND u.scored_at IS NULL)
                    OR u.score_version < ?
                    OR NOT EXISTS (
@@ -199,6 +209,38 @@ class Database:
             ),
         ).fetchall()
         return rows
+
+    def count_silent_processing_queue(self):
+        """Count users awaiting silent-mode collection + scoring.
+
+        Mirrors the WHERE clause of :meth:`users_for_silent_processing`
+        so the dashboard's "awaiting processing" KPI matches exactly the
+        queue the silent runner will work through.
+        """
+        row = self.conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM users u
+            WHERE u.owner = 0
+              AND u.status != 'DELETED'
+              AND (
+                  u.repos_fetched_at IS NULL
+                  OR u.repos_fetched_at < datetime('now', ?)
+              )
+              AND NOT (
+                  u.score_version = ?
+                  AND u.scored_at IS NOT NULL
+                  AND u.scored_at >= datetime('now', ?)
+                  AND u.repos_fetched_at IS NOT NULL
+              )
+            """,
+            (
+                f"-{REPO_FRESHNESS_DAYS} days",
+                CURRENT_SCORE_VERSION,
+                f"-{SCORE_FRESHNESS_DAYS} days",
+            ),
+        ).fetchone()
+        return row[0]
 
     def users_for_repo_collection(self):
         """Return users that need repo re-collection.

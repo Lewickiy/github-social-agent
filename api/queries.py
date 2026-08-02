@@ -7,7 +7,7 @@ return plain dicts/lists ready to be JSON-serialised by the API layer.
 import json
 from datetime import datetime, timedelta, timezone
 
-from core.config import GITHUB_API_RATE_LIMIT
+from core.config import CURRENT_SCORE_VERSION, GITHUB_API_RATE_LIMIT
 
 
 def github_api_usage(db, hours=1):
@@ -58,13 +58,33 @@ def overview_stats(db, daily_limit):
     total = count(
         "SELECT COUNT(*) FROM users WHERE owner = 0 AND status != 'DELETED'"
     )
-    scored = count("SELECT COUNT(*) FROM users WHERE score > 0 AND owner = 0")
+    # "Scored" = users who actually went through scoring with the current
+    # algorithm version.  `score > 0` is NOT a good proxy: the scorer
+    # legitimately assigns 0 to most low-quality accounts, so counting only
+    # positive scores understated real scoring progress (2% of the pipeline
+    # instead of the actual ~77%).
+    scored = count(
+        "SELECT COUNT(*) FROM users "
+        "WHERE owner = 0 AND status != 'DELETED' "
+        "AND repos_fetched_at IS NOT NULL "
+        "AND scored_at IS NOT NULL AND score_version = ?",
+        (CURRENT_SCORE_VERSION,),
+    )
+    # Users whose score is actually above zero (follow-worthy).
+    scored_positive = count(
+        "SELECT COUNT(*) FROM users "
+        "WHERE owner = 0 AND status != 'DELETED' "
+        "AND repos_fetched_at IS NOT NULL AND score > 0"
+    )
     followed = count("SELECT COUNT(*) FROM users WHERE status = 'FOLLOWED'")
     followbacks = count("SELECT COUNT(*) FROM users WHERE status = 'FOLLOWBACK'")
     unfollowed = count(
         "SELECT COUNT(*) FROM users WHERE status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'"
     )
-    new = count("SELECT COUNT(*) FROM users WHERE status = 'NEW'")
+    # Real processing queue: users still awaiting repo collection / fresh
+    # scoring (same eligibility the silent runner uses).  `status = 'NEW'`
+    # is not used here — it also counts already-processed users.
+    queue = db.count_silent_processing_queue()
     deleted = count("SELECT COUNT(*) FROM users WHERE status = 'DELETED'")
     ml_positive = count(
         "SELECT COUNT(*) FROM users WHERE ml_follow_prediction = 1"
@@ -79,7 +99,8 @@ def overview_stats(db, daily_limit):
         "totals": {
             "total": total,
             "scored": scored,
-            "new": new,
+            "scored_positive": scored_positive,
+            "queue": queue,
             "followed": followed,
             "followbacks": followbacks,
             "unfollowed_after_mutual": unfollowed,
