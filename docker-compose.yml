@@ -1,0 +1,51 @@
+services:
+  github-bot:
+    build: .
+    # Запуск от текущего пользователя, чтобы файлы (БД, логи)
+    # не создавались от root
+    user: "${UID:-1000}:${GID:-1000}"
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE=/app/data/github_social.db
+      - LOG_FILE=/app/logs/github_social.log
+    volumes:
+      # База данных — каталог ./data монтируется целиком как /app/data.
+      # Любые WAL/SHM/journal-файлы SQLite создаются РЯДОМ с БД в ./data/
+      # на хосте → единый источник истины для контейнера, host-скриптов
+      # и PyCharm/DBeaver (доступ через симлинк github_social.db →
+      # data/github_social.db). Split-brain (WAL в logs/) невозможен.
+      - ./data:/app/data
+      # Логи — отдельный каталог, не пересекается с путём БД
+      - ./logs:/app/logs
+      # ML-модели — сохраняются на хост (переживают пересборки)
+      - ./models:/app/models
+    # Команда по умолчанию (silent-режим).
+    # Для других команд: docker compose run --rm github-bot --score
+    command: ["--silent"]
+
+  # ── Веб-дашборд (FastAPI + собранный фронтенд) ────────────────────────
+  # Читает ту же SQLite-БД (./data) и может запускать режимы бота через
+  # API. Порт 8087 на хосте → 8000 в контейнере.
+  github-dashboard:
+    build: .
+    user: "${UID:-1000}:${GID:-1000}"
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE=/app/data/github_social.db
+      - LOG_FILE=/app/logs/github_social.log
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
+    ports:
+      - "8087:8000"
+    # Entrypoint переопределён на uvicorn, а CMD из образа (["--help"])
+    # очищен, иначе Docker добавил бы его к аргументам uvicorn и контейнер
+    # завершился бы сразу с выводом справки.
+    entrypoint: ["python", "-u", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: []
+    restart: unless-stopped

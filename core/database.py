@@ -1,7 +1,8 @@
+import json
 import re
 import sqlite3
-from datetime import datetime, timezone
-from config import (
+from datetime import datetime, timedelta, timezone
+from core.config import (
     DATABASE,
     CURRENT_SCORE_VERSION,
     REPO_FRESHNESS_DAYS,
@@ -29,6 +30,10 @@ class Database:
 
     def __init__(self, path=None):
         self.conn = sqlite3.connect(path or DATABASE)
+        # Several bot threads write to the same DB concurrently (parallel
+        # silent workers + background workers).  Without a busy timeout,
+        # a write collision on WAL raises "database is locked" instantly.
+        self.conn.execute("PRAGMA busy_timeout=5000")
 
     # --------------------------------------------------
     # Users
@@ -60,6 +65,21 @@ class Database:
             "SELECT username FROM users WHERE owner = 1"
         ).fetchone()
         return row[0] if row else None
+
+    def store_full_profile(self, username, api_data):
+        """Cache the full GitHub API user response as JSON.
+
+        Called after every ``github.user(username)`` call so that the ML
+        feature extractor has access to all profile fields (following,
+        created_at, blog, location, email, etc.) without extra API calls.
+        """
+        if api_data is None:
+            return
+        self.conn.execute(
+            "UPDATE users SET github_profile_json = ? WHERE username = ?",
+            (json.dumps(api_data, ensure_ascii=False), username),
+        )
+        self.conn.commit()
 
     def update_score(self, username, score, info):
         self.conn.execute(
@@ -140,7 +160,10 @@ class Database:
           - deleted users,
           - users whose repos were fetched within REPO_FRESHNESS_DAYS,
           - users already scored with the current algorithm version
-            within SCORE_FRESHNESS_DAYS.
+            within SCORE_FRESHNESS_DAYS **and whose repos were actually
+            collected** (repos_fetched_at IS NOT NULL).  A score stamped
+            without repo data (repos_fetched_at IS NULL) is not
+            trustworthy, so such users stay in the queue.
 
         Ordered by:
           1. Owner followers (discovered_from = 'owner_followers') — priority,
@@ -163,6 +186,7 @@ class Database:
                   u.score_version = ?
                   AND u.scored_at IS NOT NULL
                   AND u.scored_at >= datetime('now', ?)
+                  AND u.repos_fetched_at IS NOT NULL
               )
             ORDER BY
                 CASE WHEN u.discovered_from = 'owner_followers' THEN 0 ELSE 1 END,
@@ -232,10 +256,22 @@ class Database:
     # --------------------------------------------------
 
     def get_user_cached_info(self, username):
-        """Return cached user profile from the users table, or None."""
+        """Return cached user profile from the users table, or None.
+
+        ``public_repos`` / ``followers`` are returned as ``None`` when no
+        reliable profile data exists yet, so callers fall back to an API
+        fetch instead of trusting possibly-stale summary columns.
+
+        A full ``github_profile_json`` (written by ``store_full_profile``
+        after a real API round-trip) is the source of truth: when present,
+        its ``public_repos`` / ``followers`` take precedence.  When absent
+        the summary columns are NOT trusted — a previous scoring pass may
+        have stamped zeros into them without ever fetching the user.
+        """
         row = self.conn.execute(
             """
-            SELECT username, public_repos, followers, bio, company, score, scored_at, status
+            SELECT username, public_repos, followers, bio, company,
+                   score, scored_at, status, github_profile_json
             FROM users WHERE username = ?
             """,
             (username,),
@@ -244,16 +280,42 @@ class Database:
         if not row:
             return None
 
-        return {
+        result = {
             "login": row[0],
-            "public_repos": row[1] or 0,
-            "followers": row[2] or 0,
+            "public_repos": row[1],
+            "followers": row[2],
             "bio": row[3],
             "company": row[4],
             "score": row[5],
             "scored_at": row[6],
             "status": row[7],
         }
+
+        # Only a full github_profile_json (from a real API round-trip) is
+        # trustworthy.  Without it the summary columns may have been
+        # stamped 0 by an earlier unreliable scoring pass, so signal
+        # "no data" (None) and let callers re-fetch from the API.
+        if not row[8]:
+            result["public_repos"] = None
+            result["followers"] = None
+            return result
+
+        try:
+            full = json.loads(row[8])
+            # The JSON is the raw API response — its values win.
+            for key in (
+                "public_repos", "followers", "following", "public_gists",
+                "blog", "location", "email", "hireable", "name", "type",
+                "twitter_username", "created_at",
+            ):
+                if key in full:
+                    result[key] = full[key]
+        except (json.JSONDecodeError, TypeError):
+            # Corrupt JSON — treat as no reliable profile data.
+            result["public_repos"] = None
+            result["followers"] = None
+
+        return result
 
     # --------------------------------------------------
     # Optimisation helpers — freshness / TTL
@@ -321,6 +383,69 @@ class Database:
         self.conn.commit()
 
     # --------------------------------------------------
+    # ETag cache (conditional requests — 304 is free)
+    # --------------------------------------------------
+
+    def get_repos_etag(self, username):
+        """Return the cached ETag for a user's repo list, or None."""
+        row = self.conn.execute(
+            "SELECT repos_etag FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_repos_etag(self, username, etag):
+        """Persist the ETag of the last ``/users/{user}/repos`` response."""
+        self.conn.execute(
+            "UPDATE users SET repos_etag = ? WHERE username = ?",
+            (etag, username),
+        )
+        self.conn.commit()
+
+    def get_languages_etag(self, repo_id):
+        """Return the cached ETag for a repo's language breakdown, or None."""
+        row = self.conn.execute(
+            "SELECT languages_etag FROM repositories WHERE id = ?",
+            (repo_id,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_languages_etag(self, repo_id, etag):
+        """Persist the ETag of the last ``/repos/{owner}/{repo}/languages`` response."""
+        self.conn.execute(
+            "UPDATE repositories SET languages_etag = ? WHERE id = ?",
+            (etag, repo_id),
+        )
+        self.conn.commit()
+
+    def repos_needing_languages(self, username, skip_forks=True):
+        """Return ``(id, name)`` rows of repos whose languages were never fetched.
+
+        Used by the repos-304 fast-path: when the repo list is unchanged we
+        still backfill language data for repos missed in a previous aborted
+        run (``last_checked_at IS NULL``), so scoring data stays complete.
+        Forks are excluded when *skip_forks* is True (their languages are
+        intentionally never fetched — SKIP_FORK_LANGUAGES).
+        """
+        if skip_forks:
+            rows = self.conn.execute(
+                """
+                SELECT id, name FROM repositories
+                WHERE user_id = ? AND last_checked_at IS NULL AND is_fork = 0
+                """,
+                (username,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT id, name FROM repositories
+                WHERE user_id = ? AND last_checked_at IS NULL
+                """,
+                (username,),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    # --------------------------------------------------
     # Followers count (incremental scan detection)
     # --------------------------------------------------
 
@@ -343,6 +468,125 @@ class Database:
             WHERE username = ?
             """,
             (count, now, username),
+        )
+        self.conn.commit()
+
+    # --------------------------------------------------
+    # Historical snapshots (daily mutable-profile data)
+    # --------------------------------------------------
+
+    def store_user_snapshot(self, username, followers=None, following=None,
+                            public_repos=None, public_gists=None, extra=None):
+        """Record today's snapshot for *username* (upsert per day).
+
+        At most one row per (username, snapshot_date) — re-running the
+        snapshot on the same day updates that row.  Works for any user,
+        so snapshots can later be accumulated for everyone, not just the
+        owner.
+
+        *extra* is an optional dict of other mutable profile fields
+        (name, company, bio, location, …) stored as JSON for future
+        analytics.
+
+        ``snapshot_date`` is the **UTC** date so it matches the rest of
+        the codebase (Docker containers default to UTC — "noon" is
+        12:00 UTC there).
+        """
+        today = datetime.now(timezone.utc).date().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            """
+            INSERT INTO user_snapshots (
+                username, snapshot_date, followers_count, following_count,
+                public_repos_count, public_gists_count, extra_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, snapshot_date) DO UPDATE SET
+                followers_count    = COALESCE(excluded.followers_count,
+                                             user_snapshots.followers_count),
+                following_count    = COALESCE(excluded.following_count,
+                                             user_snapshots.following_count),
+                public_repos_count = COALESCE(excluded.public_repos_count,
+                                             user_snapshots.public_repos_count),
+                public_gists_count = COALESCE(excluded.public_gists_count,
+                                             user_snapshots.public_gists_count),
+                extra_json         = COALESCE(excluded.extra_json,
+                                             user_snapshots.extra_json),
+                updated_at         = excluded.updated_at
+            """,
+            (
+                username, today, followers, following, public_repos,
+                public_gists, json.dumps(extra, ensure_ascii=False) if extra else None,
+                now, now,
+            ),
+        )
+        self.conn.commit()
+
+    def get_user_snapshots(self, username, since_date=None):
+        """Return daily snapshots for *username* (oldest first).
+
+        ``since_date`` is an ISO date string (YYYY-MM-DD); None = all.
+        Returns a list of dicts.
+        """
+        sql = (
+            "SELECT snapshot_date, followers_count, following_count, "
+            "public_repos_count, public_gists_count, extra_json "
+            "FROM user_snapshots WHERE username = ?"
+        )
+        params = [username]
+        if since_date:
+            sql += " AND snapshot_date >= ?"
+            params.append(since_date)
+        sql += " ORDER BY snapshot_date"
+        rows = self.conn.execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            extra = None
+            if r[5]:
+                try:
+                    extra = json.loads(r[5])
+                except (json.JSONDecodeError, TypeError):
+                    extra = None
+            out.append({
+                "date": r[0],
+                "followers_count": r[1],
+                "following_count": r[2],
+                "public_repos_count": r[3],
+                "public_gists_count": r[4],
+                "extra": extra,
+            })
+        return out
+
+    # --------------------------------------------------
+    # GitHub API usage meter
+    # --------------------------------------------------
+
+    def record_api_request(self, endpoint, status_code=None):
+        """Append one GitHub API round-trip to the request log.
+
+        Called from github_client on every real HTTP call to api.github.com
+        (including 304s) so the dashboard can show a live per-hour request
+        rate.  Uses UTC ISO timestamps, consistent with the rest of the DB.
+        """
+        self.conn.execute(
+            "INSERT INTO github_api_requests (endpoint, status_code, created_at) "
+            "VALUES (?, ?, ?)",
+            (endpoint, status_code, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def prune_api_requests(self, older_than_hours=48):
+        """Delete request-log rows older than *older_than_hours*.
+
+        Keeps the table small — the per-hour meter only ever needs the last
+        few hours of data.  Called opportunistically by the API server.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+        ).isoformat()
+        self.conn.execute(
+            "DELETE FROM github_api_requests WHERE created_at < ?",
+            (cutoff,),
         )
         self.conn.commit()
 
@@ -754,6 +998,54 @@ class Database:
         )
         self.conn.commit()
 
+    def get_next_queued_user(self, threshold):
+        """Return the earliest NEW user with score >= threshold (FIFO).
+
+        Ordered by ``created_at ASC`` so the user who entered the system
+        first gets followed first.  Returns ``(username, score)`` or None.
+        """
+        row = self.conn.execute(
+            """
+            SELECT username, score FROM users
+            WHERE status = 'NEW'
+              AND score >= ?
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (threshold,),
+        ).fetchone()
+        return row
+
+    def get_mutual_follow_users(self):
+        """Return usernames for all confirmed mutual-follow users (FOLLOWBACK).
+
+        These are users who followed us back after we followed them.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT username FROM users
+            WHERE status = 'FOLLOWBACK'
+            ORDER BY followed_at ASC
+            """
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def mark_unfollowed_after_mutual(self, username):
+        """Mark a user who unfollowed us after a mutual follow.
+
+        Sets status to ``UNFOLLOWED_AFTER_MUTUAL_FOLLOW``.
+        Does not overwrite ``followed_at`` (preserves original follow date).
+        """
+        self.conn.execute(
+            """
+            UPDATE users
+            SET status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'
+            WHERE username = ?
+            """,
+            (username,),
+        )
+        self.conn.commit()
+
     def get_user_companies(self, username):
         """Return list of company logins linked to *username*."""
         rows = self.conn.execute(
@@ -767,6 +1059,172 @@ class Database:
             (username,),
         ).fetchall()
         return [(r[0], r[1], r[2]) for r in rows]
+
+    # --------------------------------------------------
+    # ML — training data & predictions
+    # --------------------------------------------------
+
+    def get_user_profile_json(self, username):
+        """Return the cached full GitHub API response for *username*, or None."""
+        row = self.conn.execute(
+            "SELECT github_profile_json FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def get_training_users(self):
+        """Return users for ML training with their labels.
+
+        Positive examples (label=1): users with status FOLLOWBACK.
+        Negative examples (label=0):
+          - FOLLOWED for more than 7 days (no mutual follow),
+          - UNFOLLOWED_AFTER_MUTUAL_FOLLOW.
+
+        Only includes users who have been scored and have repo data.
+
+        Returns list of (username, label).
+        """
+        rows = self.conn.execute(
+            """
+            SELECT username,
+                   CASE
+                       WHEN status = 'FOLLOWBACK' THEN 1
+                       ELSE 0
+                   END AS label
+            FROM users
+            WHERE (
+                status = 'FOLLOWBACK'
+                OR (
+                    status = 'FOLLOWED'
+                    AND followed_at IS NOT NULL
+                    AND followed_at < datetime('now', '-7 days')
+                )
+                OR status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'
+            )
+            AND score IS NOT NULL
+            AND score > 0
+            AND EXISTS (
+                SELECT 1 FROM repositories WHERE user_id = users.username
+            )
+            ORDER BY username
+            """
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def get_user_repo_aggregates(self, username):
+        """Return aggregated repository statistics for *username*.
+
+        Returns a dict with keys: repo_count, sum_stars, avg_stars,
+        max_stars, sum_forks, avg_forks, max_forks, avg_watchers,
+        archived_count, fork_count, avg_repo_age_days,
+        days_since_last_push, has_description_ratio.
+        All values are 0 if the user has no repos.
+        """
+        row = self.conn.execute(
+            """
+            SELECT
+                COUNT(*)                                                   AS repo_count,
+                COALESCE(SUM(stars), 0)                                   AS sum_stars,
+                COALESCE(AVG(stars), 0)                                   AS avg_stars,
+                COALESCE(MAX(stars), 0)                                   AS max_stars,
+                COALESCE(SUM(forks), 0)                                   AS sum_forks,
+                COALESCE(AVG(forks), 0)                                   AS avg_forks,
+                COALESCE(MAX(forks), 0)                                   AS max_forks,
+                COALESCE(AVG(watchers), 0)                                AS avg_watchers,
+                COALESCE(SUM(CASE WHEN is_archived THEN 1 ELSE 0 END), 0) AS archived_count,
+                COALESCE(SUM(CASE WHEN is_fork THEN 1 ELSE 0 END), 0)     AS fork_count,
+                COALESCE(
+                    AVG(
+                        julianday('now') - julianday(repository_created_at)
+                    ), 0
+                )                                                          AS avg_repo_age_days,
+                COALESCE(
+                    julianday('now') - julianday(MAX(repository_updated_at)),
+                    9999
+                )                                                          AS days_since_last_push,
+                COALESCE(
+                    CAST(SUM(CASE WHEN description IS NOT NULL AND description != '' THEN 1 ELSE 0 END) AS REAL)
+                    / NULLIF(COUNT(*), 0), 0
+                )                                                          AS has_description_ratio
+            FROM repositories
+            WHERE user_id = ?
+            """,
+            (username,),
+        ).fetchone()
+
+        if not row or row[0] == 0:
+            return {
+                "repo_count": 0, "sum_stars": 0, "avg_stars": 0,
+                "max_stars": 0, "sum_forks": 0, "avg_forks": 0,
+                "max_forks": 0, "avg_watchers": 0, "archived_count": 0,
+                "fork_count": 0, "avg_repo_age_days": 0,
+                "days_since_last_push": 9999, "has_description_ratio": 0,
+            }
+
+        return {
+            "repo_count": row[0],
+            "sum_stars": row[1],
+            "avg_stars": row[2],
+            "max_stars": row[3],
+            "sum_forks": row[4],
+            "avg_forks": row[5],
+            "max_forks": row[6],
+            "avg_watchers": row[7],
+            "archived_count": row[8],
+            "fork_count": row[9],
+            "avg_repo_age_days": row[10],
+            "days_since_last_push": row[11],
+            "has_description_ratio": row[12],
+        }
+
+    def get_global_language_frequencies(self, top_n):
+        """Return the *top_n* most-used languages across all repos.
+
+        Returns list of (language_name, frequency).
+        """
+        rows = self.conn.execute(
+            """
+            SELECT l.name, COUNT(DISTINCT rl.repository_id) AS freq
+            FROM repository_languages rl
+            JOIN languages l ON l.id = rl.language_id
+            GROUP BY l.name
+            ORDER BY freq DESC
+            LIMIT ?
+            """,
+            (top_n,),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def get_global_topic_frequencies(self, top_n):
+        """Return the *top_n* most-used topics across all repos.
+
+        Returns list of (topic_name, frequency).
+        """
+        rows = self.conn.execute(
+            """
+            SELECT t.name, COUNT(DISTINCT rt.repository_id) AS freq
+            FROM repository_topics rt
+            JOIN topics t ON t.id = rt.topic_id
+            GROUP BY t.name
+            ORDER BY freq DESC
+            LIMIT ?
+            """,
+            (top_n,),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def save_ml_prediction(self, username, prediction):
+        """Store the ML model's prediction (0 or 1) for *username*."""
+        self.conn.execute(
+            "UPDATE users SET ml_follow_prediction = ? WHERE username = ?",
+            (prediction, username),
+        )
+        self.conn.commit()
 
     def developer_profile(self, username):
         """Build a full developer profile dict for display."""
@@ -799,3 +1257,76 @@ class Database:
             "topics": topics,
             "companies": companies,
         }
+
+    # --------------------------------------------------
+    # Job runs (dashboard)
+    # --------------------------------------------------
+
+    def create_job_run(self, mode):
+        """Insert a new job_run row.  Returns the new job id."""
+        now = datetime.now(timezone.utc).isoformat()
+        cur = self.conn.execute(
+            "INSERT INTO job_runs (mode, status, created_at) VALUES (?, 'PENDING', ?)",
+            (mode, now),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def mark_job_running(self, job_id, pid):
+        """Mark a job as RUNNING with its OS pid."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE job_runs SET status = 'RUNNING', pid = ?, started_at = ? WHERE id = ?",
+            (pid, now, job_id),
+        )
+        self.conn.commit()
+
+    def finish_job(self, job_id, exit_code, error=None):
+        """Mark a job as SUCCESS or FAILED based on its exit code."""
+        now = datetime.now(timezone.utc).isoformat()
+        status = "SUCCESS" if exit_code == 0 else "FAILED"
+        self.conn.execute(
+            """
+            UPDATE job_runs
+            SET status = ?, finished_at = ?, exit_code = ?, error = ?
+            WHERE id = ?
+            """,
+            (status, now, exit_code, error, job_id),
+        )
+        self.conn.commit()
+
+    def _job_row_to_dict(self, row):
+        """Map a job_runs row to a dict.
+
+        Column names are read once per connection via PRAGMA table_info so
+        the mapping stays in sync with the schema even if a future migration
+        adds a column to job_runs.
+        """
+        if not hasattr(self, "_job_columns"):
+            self._job_columns = [
+                r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(job_runs)"
+                ).fetchall()
+            ]
+        return dict(zip(self._job_columns, row))
+
+    def get_job(self, job_id):
+        """Return a single job_run row as a dict, or None."""
+        row = self.conn.execute(
+            "SELECT * FROM job_runs WHERE id = ?", (job_id,),
+        ).fetchone()
+        return self._job_row_to_dict(row) if row else None
+
+    def list_jobs(self, limit=50):
+        """Return the most recent job runs, newest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM job_runs ORDER BY id DESC LIMIT ?", (limit,),
+        ).fetchall()
+        return [self._job_row_to_dict(r) for r in rows]
+
+    def running_jobs(self):
+        """Return all job runs currently in RUNNING/PENDING state."""
+        rows = self.conn.execute(
+            "SELECT * FROM job_runs WHERE status IN ('RUNNING', 'PENDING')"
+        ).fetchall()
+        return [self._job_row_to_dict(r) for r in rows]
