@@ -157,7 +157,7 @@ export default function ManagementPage() {
                     {error}
                 </div>
             )}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {/* Timezone — day boundaries for daily limits, windows, snapshots */}
                 <div className="card p-4">
                     <div className="flex items-center gap-2 mb-1">
