@@ -1,9 +1,9 @@
 """Background worker — daily historical snapshots of mutable profile data.
 
-Once a day (at ``SNAPSHOT_HOUR`` — noon by default, server local time)
-it records a snapshot of the owner's follower count, following count,
-public repo count and other changing profile fields into the
-``user_snapshots`` table.
+Once a day (at ``SNAPSHOT_HOUR`` — midnight by default, in the **user's
+timezone**, see ``core.tz``) it records a snapshot of the owner's follower
+count, following count, public repo count and other changing profile
+fields into the ``user_snapshots`` table.
 
 The snapshot logic is generic (``_snapshot_user`` works for any GitHub
 username), so accumulating snapshots for *every* user later only means
@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from core.config import SNAPSHOT_HOUR, SNAPSHOT_ON_START
 from core.github_client import GitHubAuthError, GitHubNetworkError, GitHubRateLimitError
 from core.logger import get_logger
+from core.tz import get_timezone
 
 log = get_logger(__name__)
 
@@ -52,7 +53,7 @@ class SnapshotWorker(threading.Thread):
         Shared with the main process — set on Ctrl+C / SIGTERM.
     snapshot_hour : int, optional
         Hour of day (server local time) for the scheduled snapshot.
-        Default from config ``SNAPSHOT_HOUR`` (12 — noon).
+        Default from config ``SNAPSHOT_HOUR`` (0 — midnight).
     snapshot_on_start : bool, optional
         Record a snapshot immediately on startup as well.  Default from
         config ``SNAPSHOT_ON_START`` (True).
@@ -78,12 +79,12 @@ class SnapshotWorker(threading.Thread):
         )
 
         # Initial snapshot so today has a data point even when the bot
-        # starts outside the noon window.
+        # starts outside the midnight window.
         if self._on_start:
             self._snapshot_cycle(db, github)
 
         while not self._shutdown.is_set():
-            if not self._sleep_until_next_run():
+            if not self._sleep_until_next_run(db):
                 break
             if self._shutdown.is_set():
                 break
@@ -96,22 +97,28 @@ class SnapshotWorker(threading.Thread):
     # Scheduling
     # ------------------------------------------------------------------
 
-    def _sleep_until_next_run(self):
+    def _sleep_until_next_run(self, db):
         """Sleep (interruptibly) until the next scheduled snapshot hour.
 
-        Scheduling uses **UTC** to match the rest of the codebase and the
-        Docker containers (which default to UTC — "noon" is 12:00 UTC).
+        Scheduling uses the **user's timezone** (``core.tz``) — "midnight"
+        means the user's local midnight, so the snapshot lands on the
+        local day it records.  The timezone is re-read from the settings
+        table every cycle, so a change made in the dashboard applies
+        without a restart.
 
         Returns False if interrupted by a shutdown request.
         """
-        now = datetime.now(timezone.utc)
-        next_run = now.replace(hour=self._hour, minute=0, second=0, microsecond=0)
-        if next_run <= now:
-            next_run += timedelta(days=1)
-        seconds = (next_run - now).total_seconds()
+        tz = get_timezone(db)
+        now_utc = datetime.now(timezone.utc)
+        local_now = now_utc.astimezone(tz)
+        next_local = local_now.replace(hour=self._hour, minute=0, second=0, microsecond=0)
+        if next_local <= local_now:
+            next_local += timedelta(days=1)
+        next_utc = next_local.astimezone(timezone.utc)
+        seconds = (next_utc - now_utc).total_seconds()
         log.info(
-            "Snapshot worker — next snapshot at %s UTC (in %ds)",
-            next_run.strftime("%Y-%m-%d %H:%M"), int(seconds),
+            "Snapshot worker — next snapshot at %s (%s), in %ds",
+            next_local.strftime("%Y-%m-%d %H:%M"), tz, int(seconds),
         )
 
         deadline = time.monotonic() + seconds
@@ -126,9 +133,11 @@ class SnapshotWorker(threading.Thread):
     def _snapshot_targets(self, db):
         """Usernames to snapshot in this cycle.
 
-        Today: only the owner.  Later, extend to all tracked users —
-        e.g. ``SELECT username FROM users WHERE status != 'DELETED'`` —
-        everything else (schema, writer, chart) already supports it.
+        Today: only the owner.  Later, extend to all tracked users — e.g.
+        ``SELECT username FROM users u LEFT JOIN user_current_status c
+        ON c.username = u.username WHERE COALESCE(c.status, 'NEW') != 'DELETED'``
+        (statuses live in user_status_history) — everything else (schema,
+        writer, chart) already supports it.
         """
         owner = db.get_owner()
         return [owner] if owner else []

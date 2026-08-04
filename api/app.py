@@ -20,26 +20,31 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from zoneinfo import ZoneInfoNotFoundError
 
 from api.queries import (
+    FOLLOWERS_HISTORY_DAYS,
     activity_timeline,
     followers_history,
     github_api_usage,
     language_options,
     list_users,
+    ml_state,
     overview_stats,
     recent_actions,
     score_buckets,
     status_distribution,
+    total_actions,
     user_profile,
 )
 from core.config import DAILY_FOLLOW_LIMIT
 from core.database import Database
+from core.tz import DEFAULT_TIMEZONE, get_timezone_name, set_timezone, utc_offset_minutes
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -304,7 +309,14 @@ def health():
 
 
 @app.get("/api/stats")
-def stats():
+def stats(days: int = Query(30, ge=1, le=365)):
+    """Aggregate dashboard stats.
+
+    ``days`` scopes the interval-dependent blocks (activity timeline,
+    recent-actions feed) — it is what the Overview interval toggle sends.
+    The Followers growth chart is intentionally *not* scoped: it always
+    covers ``FOLLOWERS_HISTORY_DAYS`` (fixed 30-day snapshot window).
+    """
     db = _db()
     try:
         _cleanup_stale_jobs()
@@ -312,14 +324,14 @@ def stats():
         # recent history.
         db.prune_api_requests()
         return {
-            **overview_stats(db, DAILY_FOLLOW_LIMIT),
-            "github_usage": github_api_usage(db),
-            "activity": activity_timeline(db, days=30),
-            "followers_history": followers_history(db, days=30),
-            "status_distribution": status_distribution(db),
-            "score_buckets": score_buckets(db),
-            "recent_actions": recent_actions(db),
-            "jobs": db.list_jobs(limit=8),
+            **overview_stats(db, DAILY_FOLLOW_LIMIT, days=days),
+            "github_usage": github_api_usage(db, days=days),
+            "activity": activity_timeline(db, days=days),
+            "total_actions": total_actions(db, days=days),
+            "followers_history": followers_history(db, days=FOLLOWERS_HISTORY_DAYS),
+            "status_distribution": status_distribution(db, days=days),
+            "score_buckets": score_buckets(db, days=days),
+            "recent_actions": recent_actions(db, days=days),
         }
     finally:
         db.conn.close()
@@ -373,6 +385,16 @@ def user_detail(username: str):
     return profile
 
 
+@app.get("/api/ml")
+def ml_overview():
+    """ML dashboard tab: current model, dataset state, retrain history."""
+    db = _db()
+    try:
+        return ml_state(db)
+    finally:
+        db.conn.close()
+
+
 @app.get("/api/actions")
 def actions(days: int = Query(30, ge=1, le=365)):
     db = _db()
@@ -382,11 +404,87 @@ def actions(days: int = Query(30, ge=1, le=365)):
         db.conn.close()
 
 
+# language_options() aggregates ~335k repo-language rows (~380 ms).  The
+# Users-page filter dropdown doesn't need second-level freshness, so the
+# result is cached in-process for a few minutes.  The bot collects repos
+# continuously, so the top languages drift slowly — 15 minutes balances
+# freshness against instant page loads.  A Cache-Control header lets the
+# browser reuse the response on repeat visits without even hitting the
+# API.
+#
+# The cache is per-process: docker-compose runs uvicorn with a single
+# worker, so the in-memory state is coherent.  With multiple workers each
+# would recompute independently (harmless duplicate work).  The lock is
+# held through the ~380 ms cold recompute on purpose — a brief serialized
+# fill once per TTL beats racing the swap.
+_LANGUAGES_CACHE_TTL_SECONDS = 15 * 60
+_languages_cache = {"at": 0.0, "items": None}
+_languages_cache_lock = threading.Lock()
+
+
 @app.get("/api/languages")
-def languages():
+def languages(response: Response):
+    global _languages_cache
+    now = time.monotonic()
+    with _languages_cache_lock:
+        cached = _languages_cache
+        if (
+            cached["items"] is None
+            or now - cached["at"] >= _LANGUAGES_CACHE_TTL_SECONDS
+        ):
+            db = _db()
+            try:
+                items = language_options(db)
+            finally:
+                db.conn.close()
+            cached = _languages_cache = {"at": now, "items": items}
+        response.headers["Cache-Control"] = (
+            f"public, max-age={_LANGUAGES_CACHE_TTL_SECONDS}"
+        )
+        return {"items": cached["items"]}
+
+
+# ── Settings (user preferences) ──────────────────────────────────────────
+
+class SettingsUpdate(BaseModel):
+    timezone: str
+
+
+@app.get("/api/settings")
+def settings_view():
+    """User settings.  ``timezone_set`` is False until the user (or the
+    dashboard's auto-detection) picks a zone — the effective zone is then
+    the built-in default (UTC)."""
     db = _db()
     try:
-        return {"items": language_options(db)}
+        stored = db.get_setting("timezone")
+        effective = stored or DEFAULT_TIMEZONE
+        return {
+            "timezone": effective,
+            "timezone_set": stored is not None,
+            "utc_offset_minutes": utc_offset_minutes(db),
+        }
+    finally:
+        db.conn.close()
+
+
+@app.put("/api/settings")
+def settings_update(payload: SettingsUpdate):
+    """Persist a validated IANA timezone (e.g. ``Europe/Moscow``)."""
+    db = _db()
+    try:
+        try:
+            name = set_timezone(db, payload.timezone)
+        except ZoneInfoNotFoundError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown timezone '{payload.timezone}'.",
+            )
+        return {
+            "timezone": name,
+            "timezone_set": True,
+            "utc_offset_minutes": utc_offset_minutes(db),
+        }
     finally:
         db.conn.close()
 

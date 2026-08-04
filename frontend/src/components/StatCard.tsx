@@ -26,7 +26,7 @@ export default function StatCard({
   hint,
 }: StatCardProps) {
   return (
-    <div className="card px-4 py-3 flex items-start gap-3 transition-shadow duration-150 hover:shadow-overlay">
+    <div className="card px-4 py-3 flex items-start gap-3 min-w-0 transition-shadow duration-150 hover:shadow-overlay">
       {icon && (
         <div className="mt-0.5 text-fg-subtle shrink-0" aria-hidden>
           {icon}

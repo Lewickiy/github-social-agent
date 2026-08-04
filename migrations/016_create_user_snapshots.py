@@ -12,7 +12,7 @@ The table is generic (keyed by username), so snapshots can later be
 accumulated for *every* user — today the collector only writes the owner.
 
 ``UNIQUE(username, snapshot_date)`` guarantees at most one snapshot per
-user per day (the noon update is an upsert).
+user per day (the midnight update is an upsert).
 """
 
 

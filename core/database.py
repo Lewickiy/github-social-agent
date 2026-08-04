@@ -9,6 +9,7 @@ from core.config import (
     SCORE_FRESHNESS_DAYS,
     SILENT_REPO_CHECK_FRESHNESS_DAYS,
 )
+from core.tz import get_timezone, local_midnight_utc
 
 # ── Company parser (pure function, no external dependencies) ──
 _COMPANY_RE = re.compile(r"@([a-zA-Z0-9_-]+)")
@@ -36,11 +37,33 @@ class Database:
         self.conn.execute("PRAGMA busy_timeout=5000")
 
     # --------------------------------------------------
+    # App settings (key/value user preferences)
+    # --------------------------------------------------
+
+    def get_setting(self, key, default=None):
+        """Return the value of app setting *key*, or *default* when unset."""
+        row = self.conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,),
+        ).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key, value):
+        """Upsert app setting *key* → *value*."""
+        self.conn.execute(
+            """
+            INSERT INTO settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, str(value)),
+        )
+        self.conn.commit()
+
+    # --------------------------------------------------
     # Users
     # --------------------------------------------------
 
     def add_user(self, username, source, owner=False):
-        self.conn.execute(
+        cur = self.conn.execute(
             """
             INSERT OR IGNORE INTO users
                 (username, discovered_from, created_at, owner)
@@ -48,6 +71,12 @@ class Database:
             """,
             (username, source, datetime.now(timezone.utc).isoformat(), 1 if owner else 0),
         )
+        if cur.rowcount:
+            # Initial transition: NEW at discovery time (keeps the
+            # user_status_history log complete for users added after the
+            # 020 backfill ran).  INSERT OR IGNORE means an existing user
+            # (re-discovery) is skipped — their NEW entry already exists.
+            self._log_status_change(username, "NEW")
         self.conn.commit()
 
     def set_owner(self, username):
@@ -110,13 +139,16 @@ class Database:
     def top_users(self, limit):
         # NULL scores (users without collected repos) are excluded — they
         # carry no meaningful ranking and ``--follow`` logs them via %d.
+        # "Current status = NEW" (no lifecycle transition yet) is derived
+        # from user_status_history — the single store of statuses.
         rows = self.conn.execute(
             """
-            SELECT username, score
-            FROM users
-            WHERE status = 'NEW'
-              AND score IS NOT NULL
-            ORDER BY score DESC
+            SELECT u.username, u.score
+            FROM users u
+            LEFT JOIN user_current_status c ON c.username = u.username
+            WHERE COALESCE(c.status, 'NEW') = 'NEW'
+              AND u.score IS NOT NULL
+            ORDER BY u.score DESC
             LIMIT ?
             """,
             (limit,),
@@ -143,8 +175,9 @@ class Database:
         rows = self.conn.execute(
             """
             SELECT u.username FROM users u
+            LEFT JOIN user_current_status c ON c.username = u.username
             WHERE u.owner = 0
-              AND u.status != 'DELETED'
+              AND COALESCE(c.status, 'NEW') != 'DELETED'
               AND u.repos_fetched_at IS NOT NULL
               AND (   (u.score = 0 AND u.scored_at IS NULL)
                    OR u.score_version < ?
@@ -182,12 +215,17 @@ class Database:
              True              = small accounts first (more follow-backs).
         """
         direction = "ASC" if prioritize_small else "DESC"
+        # "Not deleted" via the materialised user_current_status table
+        # (NOT IN over the tiny deleted set) so the wide users rows are
+        # never scanned for the join.
         rows = self.conn.execute(
             f"""
             SELECT u.username
             FROM users u
             WHERE u.owner = 0
-              AND u.status != 'DELETED'
+              AND u.username NOT IN (
+                  SELECT username FROM user_current_status WHERE status = 'DELETED'
+              )
               AND (
                   u.repos_fetched_at IS NULL
                   OR u.repos_fetched_at < datetime('now', ?)
@@ -222,7 +260,9 @@ class Database:
             SELECT COUNT(*)
             FROM users u
             WHERE u.owner = 0
-              AND u.status != 'DELETED'
+              AND u.username NOT IN (
+                  SELECT username FROM user_current_status WHERE status = 'DELETED'
+              )
               AND (
                   u.repos_fetched_at IS NULL
                   OR u.repos_fetched_at < datetime('now', ?)
@@ -250,47 +290,153 @@ class Database:
         """
         rows = self.conn.execute(
             """
-            SELECT username FROM users
-            WHERE status != 'DELETED'
+            SELECT u.username FROM users u
+            WHERE u.username NOT IN (
+                SELECT username FROM user_current_status WHERE status = 'DELETED'
+            )
               AND (
-                  repos_fetched_at IS NULL
-                  OR repos_fetched_at < datetime('now', ?)
+                  u.repos_fetched_at IS NULL
+                  OR u.repos_fetched_at < datetime('now', ?)
               )
-            ORDER BY repos_fetched_at ASC NULLS FIRST
+            ORDER BY u.repos_fetched_at ASC NULLS FIRST
             """,
             (f"-{REPO_FRESHNESS_DAYS} days",),
         ).fetchall()
         return rows
 
+    # --------------------------------------------------
+    # Activity feed — one row per lifecycle event
+    # --------------------------------------------------
+
+    def _log_action(self, username, action):
+        """Append one event to the actions feed (UTC timestamped).
+
+        The feed powers the Overview "Recent activity" block.  Only
+        lifecycle *transitions* are logged (guarded by the caller's
+        ``_append_status`` guard), so each user produces at most one row
+        per event type.
+        """
+        self.conn.execute(
+            "INSERT INTO actions (username, action, created_at) VALUES (?, ?, ?)",
+            (username, action, datetime.now(timezone.utc).isoformat()),
+        )
+
+    def _upsert_current_status(self, username, status, changed_at, followed_at=None):
+        """Maintain the denormalised ``user_current_status`` row for *username*.
+
+        ``user_status_history`` stays the source of truth; this table is
+        its incremental projection so dashboard reads don't recompute the
+        latest transition.  ``followed_at`` (time of the last FOLLOWED
+        transition) is only set by a FOLLOWED append and is preserved
+        across later transitions.
+        """
+        self.conn.execute(
+            """
+            INSERT INTO user_current_status (username, status, changed_at, followed_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                status     = excluded.status,
+                changed_at = excluded.changed_at,
+                followed_at = COALESCE(excluded.followed_at,
+                                       user_current_status.followed_at)
+            """,
+            (username, status, changed_at, followed_at),
+        )
+
+    def _log_status_change(self, username, status, changed_at=None):
+        """Append one row to the ``user_status_history`` transition log.
+
+        Records that *username* entered *status* at *changed_at* (defaults
+        to now, UTC).  Used for the initial NEW transition in :meth:`add_user`;
+        later transitions go through :meth:`_append_status` (which guards
+        against duplicates).  Also updates the ``user_current_status``
+        projection table.
+        """
+        changed_at = changed_at or datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "INSERT INTO user_status_history (username, status, changed_at) "
+            "VALUES (?, ?, ?)",
+            (username, status, changed_at),
+        )
+        self._upsert_current_status(
+            username, status, changed_at,
+            changed_at if status == "FOLLOWED" else None,
+        )
+
+    def _append_status(self, username, status, changed_at=None):
+        """Append a status transition unless it repeats the current one.
+
+        ``user_status_history`` is the single store of user statuses — the
+        current status is simply its latest row (see the
+        ``user_current_status`` view).  The INSERT is one atomic statement
+        that no-ops when the user's latest transition already has *status*,
+        so concurrent workers cannot create duplicate transitions.  Returns
+        True when a row was actually appended.
+        """
+        changed_at = changed_at or datetime.now(timezone.utc).isoformat()
+        cur = self.conn.execute(
+            """
+            INSERT INTO user_status_history (username, status, changed_at)
+            SELECT ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM user_status_history
+                WHERE username = ?
+                  AND id = (SELECT MAX(id) FROM user_status_history WHERE username = ?)
+                  AND status = ?
+            )
+            """,
+            (username, status, changed_at, username, username, status),
+        )
+        if cur.rowcount:
+            self._upsert_current_status(
+                username, status, changed_at,
+                changed_at if status == "FOLLOWED" else None,
+            )
+        return cur.rowcount > 0
+
     def mark_followed(self, username):
-        now = datetime.now(timezone.utc).isoformat()
+        """Mark *username* as FOLLOWED and log a FOLLOW event.
 
-        self.conn.execute(
-            """
-            UPDATE users
-            SET status = 'FOLLOWED',
-                followed_at = ?
-            WHERE username = ?
-            """,
-            (now, username),
-        )
+        Appends a FOLLOWED transition to ``user_status_history`` (the
+        single status store) and a FOLLOW event to the activity feed.  The
+        append is atomic and skipped when the user is already FOLLOWED, so
+        the event stream (and the daily follow counter derived from it)
+        stays free of duplicates.
+        """
+        if self._append_status(username, "FOLLOWED"):
+            self._log_action(username, "FOLLOW")
+        self.conn.commit()
 
-        self.conn.execute(
-            """
-            INSERT INTO actions (username, action, created_at)
-            VALUES (?, ?, ?)
-            """,
-            (username, "FOLLOW", now),
-        )
+    def mark_followed_existing(self, username):
+        """Mark *username* as FOLLOWED on the "already following" path.
 
+        Same transition as :meth:`mark_followed` but without a FOLLOW
+        event: the silent runner re-confirms an existing follow rather than
+        issuing a new one, so the daily-follow counter (``today_follows``)
+        and the Recent-activity feed stay accurate.
+        """
+        self._append_status(username, "FOLLOWED")
         self.conn.commit()
 
     def mark_followback(self, username):
-        """Mark a user as FOLLOWBACK — they followed us after we followed them."""
-        self.conn.execute(
-            "UPDATE users SET status = 'FOLLOWBACK' WHERE username = ?",
-            (username,),
-        )
+        """Mark a user as FOLLOWBACK and log a FOLLOWBACK event.
+
+        They followed us after we followed them.  The append is atomic and
+        skipped when the user is already FOLLOWBACK, so repeated
+        owner-follower scans don't spam the feed.
+        """
+        if self._append_status(username, "FOLLOWBACK"):
+            self._log_action(username, "FOLLOWBACK")
+        self.conn.commit()
+
+    def mark_deleted(self, username):
+        """Mark *username* as DELETED (GitHub account no longer exists).
+
+        Logs a DELETED event on the first transition so the activity feed
+        shows account deletions without repeating them on later runs.
+        """
+        if self._append_status(username, "DELETED"):
+            self._log_action(username, "DELETED")
         self.conn.commit()
 
     # --------------------------------------------------
@@ -312,9 +458,12 @@ class Database:
         """
         row = self.conn.execute(
             """
-            SELECT username, public_repos, followers, bio, company,
-                   score, scored_at, status, github_profile_json
-            FROM users WHERE username = ?
+            SELECT u.username, u.public_repos, u.followers, u.bio, u.company,
+                   u.score, u.scored_at, COALESCE(c.status, 'NEW'),
+                   u.github_profile_json
+            FROM users u
+            LEFT JOIN user_current_status c ON c.username = u.username
+            WHERE u.username = ?
             """,
             (username,),
         ).fetchone()
@@ -530,11 +679,11 @@ class Database:
         (name, company, bio, location, …) stored as JSON for future
         analytics.
 
-        ``snapshot_date`` is the **UTC** date so it matches the rest of
-        the codebase (Docker containers default to UTC — "noon" is
-        12:00 UTC there).
+        ``snapshot_date`` is the **user's local** date (see ``core.tz``) —
+        the midnight snapshot belongs to the local day it records, so the
+        followers chart stays aligned with the user's calendar.
         """
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(get_timezone(self)).date().isoformat()
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             """
@@ -617,11 +766,13 @@ class Database:
         )
         self.conn.commit()
 
-    def prune_api_requests(self, older_than_hours=48):
+    def prune_api_requests(self, older_than_hours=24 * 31):
         """Delete request-log rows older than *older_than_hours*.
 
-        Keeps the table small — the per-hour meter only ever needs the last
-        few hours of data.  Called opportunistically by the API server.
+        Retention covers the longest Overview interval (30 days) so the
+        interval-scoped "GitHub API requests" card stays truthful; the
+        per-hour meter itself only needs the last few hours.  Called
+        opportunistically by the API server.
         """
         cutoff = (
             datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
@@ -637,13 +788,21 @@ class Database:
     # --------------------------------------------------
 
     def today_follows(self):
+        """Count FOLLOW events since the start of the local day.
+
+        The day boundary comes from the user's timezone (``core.tz``), so
+        the daily follow budget resets at the user's local midnight rather
+        than at UTC midnight.
+        """
+        since = local_midnight_utc(self).isoformat()
         return self.conn.execute(
             """
             SELECT COUNT(*)
             FROM actions
             WHERE action = 'FOLLOW'
-              AND date(created_at) = date('now')
-            """
+              AND created_at >= ?
+            """,
+            (since,),
         ).fetchone()[0]
 
     # --------------------------------------------------
@@ -1048,10 +1207,11 @@ class Database:
         """
         row = self.conn.execute(
             """
-            SELECT username, score FROM users
-            WHERE status = 'NEW'
-              AND score >= ?
-            ORDER BY created_at ASC
+            SELECT u.username, u.score FROM users u
+            LEFT JOIN user_current_status c ON c.username = u.username
+            WHERE COALESCE(c.status, 'NEW') = 'NEW'
+              AND u.score >= ?
+            ORDER BY u.created_at ASC
             LIMIT 1
             """,
             (threshold,),
@@ -1065,9 +1225,15 @@ class Database:
         """
         rows = self.conn.execute(
             """
-            SELECT username FROM users
-            WHERE status = 'FOLLOWBACK'
-            ORDER BY followed_at ASC
+            SELECT u.username
+            FROM users u
+            LEFT JOIN user_current_status c ON c.username = u.username
+            WHERE COALESCE(c.status, 'NEW') = 'FOLLOWBACK'
+            ORDER BY (
+                SELECT h.changed_at FROM user_status_history h
+                WHERE h.username = u.username AND h.status = 'FOLLOWED'
+                ORDER BY h.id DESC LIMIT 1
+            ) ASC
             """
         ).fetchall()
         return [row[0] for row in rows]
@@ -1075,17 +1241,13 @@ class Database:
     def mark_unfollowed_after_mutual(self, username):
         """Mark a user who unfollowed us after a mutual follow.
 
-        Sets status to ``UNFOLLOWED_AFTER_MUTUAL_FOLLOW``.
-        Does not overwrite ``followed_at`` (preserves original follow date).
+        Appends an UNFOLLOWED_AFTER_MUTUAL_FOLLOW transition and logs a
+        UNFOLLOWED event (once per user) so the activity feed reflects it.
+        The original follow time stays available as the FOLLOWED transition
+        in the history log.
         """
-        self.conn.execute(
-            """
-            UPDATE users
-            SET status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'
-            WHERE username = ?
-            """,
-            (username,),
-        )
+        if self._append_status(username, "UNFOLLOWED_AFTER_MUTUAL_FOLLOW"):
+            self._log_action(username, "UNFOLLOWED")
         self.conn.commit()
 
     def get_user_companies(self, username):
@@ -1122,10 +1284,18 @@ class Database:
     def get_training_users(self):
         """Return users for ML training with their labels.
 
-        Positive examples (label=1): users with status FOLLOWBACK.
-        Negative examples (label=0):
-          - FOLLOWED for more than 7 days (no mutual follow),
-          - UNFOLLOWED_AFTER_MUTUAL_FOLLOW.
+        Label scheme (simple 7-day reciprocity rule), derived from the
+        ``user_status_history`` log (via the ``user_current_status`` view):
+
+          * label=1 — user followed us back in response to our follow
+            (current status FOLLOWBACK), including users who followed back
+            and later unfollowed us (UNFOLLOWED_AFTER_MUTUAL_FOLLOW — they
+            DID reciprocate at least once).  Positives are not time-boxed —
+            any user who reciprocated is label=1.
+          * label=0 — user was followed by us more than 7 days ago and
+            never followed back (current status FOLLOWED with the FOLLOWED
+            transition older than 7 days).  The 7-day observation window
+            applies to the negative class only.
 
         Only includes users who have been scored and have repo data.
 
@@ -1133,27 +1303,28 @@ class Database:
         """
         rows = self.conn.execute(
             """
-            SELECT username,
+            SELECT u.username,
                    CASE
-                       WHEN status = 'FOLLOWBACK' THEN 1
+                       WHEN c.status IN ('FOLLOWBACK', 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW') THEN 1
                        ELSE 0
                    END AS label
-            FROM users
+            FROM users u
+            LEFT JOIN user_current_status c ON c.username = u.username
             WHERE (
-                status = 'FOLLOWBACK'
+                c.status = 'FOLLOWBACK'
                 OR (
-                    status = 'FOLLOWED'
-                    AND followed_at IS NOT NULL
-                    AND followed_at < datetime('now', '-7 days')
+                    c.status = 'FOLLOWED'
+                    AND c.changed_at IS NOT NULL
+                    AND c.changed_at < datetime('now', '-7 days')
                 )
-                OR status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'
+                OR c.status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'
             )
-            AND score IS NOT NULL
-            AND score > 0
+            AND u.score IS NOT NULL
+            AND u.score > 0
             AND EXISTS (
-                SELECT 1 FROM repositories WHERE user_id = users.username
+                SELECT 1 FROM repositories WHERE user_id = u.username
             )
-            ORDER BY username
+            ORDER BY u.username
             """
         ).fetchall()
         return [(row[0], row[1]) for row in rows]
@@ -1267,6 +1438,120 @@ class Database:
             (prediction, username),
         )
         self.conn.commit()
+
+    # --------------------------------------------------
+    # ML training-run history (dashboard ML tab)
+    # --------------------------------------------------
+
+    def _table_exists(self, name):
+        """True when table *name* exists in this connection's schema."""
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    def record_ml_training_run(self, metadata):
+        """Persist one training cycle into ``ml_training_runs``.
+
+        Returns the new row id, or None when the table does not exist
+        yet (migrations not applied) — the trainer must never break over
+        this, so it degrades gracefully.
+        """
+        if not self._table_exists("ml_training_runs"):
+            return None
+
+        cols = [
+            "version", "trained_at", "label_scheme", "num_samples",
+            "num_positives", "num_negatives", "input_dim", "hidden_dim",
+            "dropout", "top_languages", "top_topics", "val_accuracy",
+            "val_auc", "val_precision", "val_recall", "val_loss",
+            "pred1_ratio", "cv_folds", "cv_accuracy", "cv_auc",
+            "cv_precision", "cv_recall", "cv_pred1_ratio", "epochs",
+            "early_stopped", "device", "training_time_seconds",
+        ]
+        values = []
+        for col in cols:
+            v = metadata.get(col)
+            if col in ("top_languages", "top_topics") and v is not None:
+                v = json.dumps(v)
+            values.append(v)
+        cur = self.conn.execute(
+            f"INSERT INTO ml_training_runs ({', '.join(cols)}) "
+            f"VALUES ({', '.join('?' for _ in cols)})",
+            values,
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_ml_training_run_recompute(self, run_id, stats):
+        """Record the outcome of the background prediction recompute.
+
+        Called by the MLRecomputeWorker thread after re-predicting the
+        whole population with the freshly trained model.
+        """
+        if run_id is None or not self._table_exists("ml_training_runs"):
+            return
+        self.conn.execute(
+            """
+            UPDATE ml_training_runs
+            SET recompute_total   = ?,
+                recompute_pred_1  = ?,
+                recompute_pred_0  = ?,
+                recompute_failed  = ?,
+                recompute_done_at = ?
+            WHERE id = ?
+            """,
+            (
+                stats.get("total"), stats.get("pred_1"), stats.get("pred_0"),
+                stats.get("failed"),
+                datetime.now(timezone.utc).isoformat(),
+                run_id,
+            ),
+        )
+        self.conn.commit()
+
+    def ml_training_runs(self, limit=100):
+        """Recent training runs (newest first) as dict rows.
+
+        ``top_languages`` / ``top_topics`` are JSON columns deserialised
+        back into lists; ``early_stopped`` back to a bool.  Returns an
+        empty list when the migration hasn't been applied.
+        """
+        if not self._table_exists("ml_training_runs"):
+            return []
+        cols = [
+            "id", "version", "trained_at", "label_scheme", "num_samples",
+            "num_positives", "num_negatives", "input_dim", "hidden_dim",
+            "dropout", "top_languages", "top_topics", "val_accuracy",
+            "val_auc", "val_precision", "val_recall", "val_loss",
+            "pred1_ratio", "cv_folds", "cv_accuracy", "cv_auc",
+            "cv_precision", "cv_recall", "cv_pred1_ratio", "epochs",
+            "early_stopped", "device", "training_time_seconds",
+            "recompute_total", "recompute_pred_1", "recompute_pred_0",
+            "recompute_failed", "recompute_done_at",
+        ]
+        rows = self.conn.execute(
+            f"SELECT {', '.join(cols)} FROM ml_training_runs "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            for jcol in ("top_languages", "top_topics"):
+                raw = d.get(jcol)
+                if raw:
+                    try:
+                        d[jcol] = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        d[jcol] = []
+                else:
+                    d[jcol] = []
+            if d.get("early_stopped") is not None:
+                d["early_stopped"] = bool(d["early_stopped"])
+            out.append(d)
+        return out
 
     def developer_profile(self, username):
         """Build a full developer profile dict for display."""

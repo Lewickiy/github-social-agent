@@ -36,6 +36,43 @@ export const STATUS_META: Record<
   },
 };
 
+export interface ActionMeta {
+  label: string;
+  cls: string;
+}
+
+// Activity-feed event badges (Overview → Recent activity).  The stream
+// carries FOLLOW / FOLLOWBACK / UNFOLLOWED / DELETED lifecycle events;
+// unknown future event types fall back to a neutral badge.
+export const ACTION_META: Record<string, ActionMeta> = {
+  FOLLOW: {
+    label: "Followed",
+    cls: "bg-accent/10 text-accent border border-accent/30",
+  },
+  FOLLOWBACK: {
+    label: "Followback",
+    cls: "bg-success-subtle text-success-fg border border-success/30",
+  },
+  UNFOLLOWED: {
+    label: "Unfollowed",
+    cls: "bg-danger-subtle text-danger-fg border border-danger/30",
+  },
+  DELETED: {
+    label: "Deleted",
+    cls: "bg-canvas-subtle text-fg-muted border border-border",
+  },
+};
+
+const FALLBACK_ACTION: ActionMeta = {
+  label: "",
+  cls: "bg-canvas-subtle text-fg-muted border border-border",
+};
+
+export function actionMeta(action: string): ActionMeta {
+  const meta = ACTION_META[action];
+  return meta ? meta : { ...FALLBACK_ACTION, label: action };
+}
+
 export const JOB_STATUS_META: Record<
   string,
   { label: string; cls: string; dot: string }

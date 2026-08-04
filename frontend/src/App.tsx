@@ -1,13 +1,15 @@
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
-import { BarChart3, Settings, Users } from "lucide-react";
+import { BarChart3, BrainCircuit, Settings, Users } from "lucide-react";
 import { RefreshProvider } from "./refresh";
 import OverviewPage from "./pages/OverviewPage";
 import UsersPage from "./pages/UsersPage";
+import MLPage from "./pages/MLPage";
 import ManagementPage from "./pages/ManagementPage";
 
 const navItems = [
   { to: "/", label: "Overview", icon: BarChart3, end: true },
   { to: "/users", label: "Users", icon: Users, end: false },
+  { to: "/ml", label: "ML", icon: BrainCircuit, end: false },
   { to: "/manage", label: "Management", icon: Settings, end: false },
 ];
 
@@ -59,6 +61,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<OverviewPage />} />
             <Route path="/users" element={<UsersPage />} />
+            <Route path="/ml" element={<MLPage />} />
             <Route path="/manage" element={<ManagementPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

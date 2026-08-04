@@ -7,7 +7,6 @@ All delays are configurable in config.py (SILENT_* settings).
 import random
 import threading
 import time
-from datetime import datetime, timezone
 
 from core.config import (
     DAILY_FOLLOW_LIMIT,
@@ -231,11 +230,7 @@ class SilentRunner:
                 continue
 
             if info is None:
-                self.db.conn.execute(
-                    "UPDATE users SET status = 'DELETED' WHERE username = ?",
-                    (username,),
-                )
-                self.db.conn.commit()
+                self.db.mark_deleted(username)
                 log.info("User %s not found — marked DELETED", username)
                 print(f"  👻 {username} — deleted, skipped")
                 return
@@ -556,14 +551,10 @@ class SilentRunner:
         try:
             if self.github.already_following(username):
                 # Mark as FOLLOWED so they don't stay in the queue forever.
-                now = datetime.now(timezone.utc).isoformat()
-                self.db.conn.execute(
-                    """UPDATE users
-                       SET status = 'FOLLOWED', followed_at = ?
-                       WHERE username = ?""",
-                    (now, username),
-                )
-                self.db.conn.commit()
+                # Uses the dedicated method (no FOLLOW action — this is a
+                # re-confirmation, not a new follow, so the daily-follow
+                # counter and activity feed stay accurate).
+                self.db.mark_followed_existing(username)
                 log.debug("Already following %s — marked FOLLOWED", username)
                 print(f"    👤 Already following {username}")
                 return False

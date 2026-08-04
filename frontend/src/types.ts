@@ -40,6 +40,8 @@ export interface Job {
 
 export interface GitHubUsage {
   requests_last_hour: number;
+  /** Requests within the selected Overview interval (null when not scoped). */
+  requests_in_window: number | null;
   requests_today: number;
   requests_total: number;
   rate_limit: number;
@@ -64,11 +66,12 @@ export interface Stats {
   owner: string | null;
   followers_count: number | null;
   activity: ActivityPoint[];
+  /** All lifecycle events (FOLLOW/FOLLOWBACK/UNFOLLOWED/DELETED) in the window. */
+  total_actions: number;
   followers_history: FollowerHistoryPoint[];
   status_distribution: StatusCount[];
   score_buckets: BucketCount[];
   recent_actions: RecentAction[];
-  jobs: Job[];
 }
 
 export interface UserRow {
@@ -163,4 +166,92 @@ export interface Config {
 
 export interface JobsResponse {
   items: Job[];
+}
+
+export interface Settings {
+  /** Effective IANA timezone (stored value or the UTC default). */
+  timezone: string;
+  /** True once the user (or auto-detection) has picked a timezone. */
+  timezone_set: boolean;
+  /** Current UTC offset of the timezone in minutes (e.g. 180 = UTC+3). */
+  utc_offset_minutes: number;
+}
+
+/** Metadata of one trained model (current.json / ml_training_runs row). */
+export interface MLModelInfo {
+  version: number;
+  trained_at: string | null;
+  label_scheme: string | null;
+  num_samples: number | null;
+  num_positives: number | null;
+  num_negatives: number | null;
+  input_dim: number | null;
+  hidden_dim: number | null;
+  dropout: number | null;
+  val_accuracy: number | null;
+  val_auc: number | null;
+  val_precision: number | null;
+  val_recall: number | null;
+  val_loss: number | null;
+  pred1_ratio: number | null;
+  cv_folds: number | null;
+  cv_accuracy: number | null;
+  cv_auc: number | null;
+  cv_precision: number | null;
+  cv_recall: number | null;
+  cv_pred1_ratio: number | null;
+  epochs: number | null;
+  early_stopped: boolean | null;
+  device: string | null;
+  training_time_seconds: number | null;
+  top_languages: string[];
+  top_topics: string[];
+}
+
+/** One retrain row — history of how the model evolved. */
+export interface MLTrainingRun {
+  id: number;
+  version: number;
+  trained_at: string | null;
+  num_samples: number | null;
+  num_positives: number | null;
+  num_negatives: number | null;
+  input_dim: number | null;
+  val_accuracy: number | null;
+  val_auc: number | null;
+  val_precision: number | null;
+  val_recall: number | null;
+  pred1_ratio: number | null;
+  cv_folds: number | null;
+  cv_accuracy: number | null;
+  cv_auc: number | null;
+  cv_pred1_ratio: number | null;
+  early_stopped: boolean | null;
+  training_time_seconds: number | null;
+  /** Prediction distribution produced by the post-train recompute. */
+  recompute_total: number | null;
+  recompute_pred_1: number | null;
+  recompute_pred_0: number | null;
+  recompute_failed: number | null;
+  recompute_done_at: string | null;
+  top_languages: string[];
+  top_topics: string[];
+}
+
+export interface MLDataset {
+  total_users: number;
+  with_prediction: number;
+  pred_1: number;
+  pred_0: number;
+  positive_share_pct: number;
+  training_samples: number;
+  training_positives: number;
+  training_negatives: number;
+  training_positive_share_pct: number;
+}
+
+export interface MLState {
+  current_model: MLModelInfo | null;
+  dataset: MLDataset;
+  history: MLTrainingRun[];
 }

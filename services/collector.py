@@ -317,8 +317,12 @@ class Collector:
 
         rows = self.db.conn.execute(
             """
-            SELECT username, followers_count FROM users
-            WHERE owner = 0 AND status != 'DELETED' AND repos_fetched_at IS NOT NULL
+            SELECT u.username, u.followers_count
+            FROM users u
+            LEFT JOIN user_current_status c ON c.username = u.username
+            WHERE u.owner = 0
+              AND COALESCE(c.status, 'NEW') != 'DELETED'
+              AND u.repos_fetched_at IS NOT NULL
             """
         ).fetchall()
 
@@ -494,11 +498,7 @@ class Collector:
                 continue
 
             if info is None:
-                self.db.conn.execute(
-                    "UPDATE users SET status = 'DELETED' WHERE username = ?",
-                    (username,),
-                )
-                self.db.conn.commit()
+                self.db.mark_deleted(username)
                 log.info("User %s not found — marked DELETED", username)
                 return
 
