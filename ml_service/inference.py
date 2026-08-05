@@ -36,6 +36,9 @@ def load_model():
         model = FollowbackPredictor(
             input_dim=checkpoint["input_dim"],
             hidden_dim=checkpoint["hidden_dim"],
+            # Old checkpoints were saved without dropout → default 0.0 keeps
+            # the exact same architecture, so they still load unchanged.
+            dropout=checkpoint.get("dropout", 0.0),
         )
         model.load_state_dict(checkpoint["state_dict"])
         model.eval()

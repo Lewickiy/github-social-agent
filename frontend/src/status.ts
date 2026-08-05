@@ -36,6 +36,43 @@ export const STATUS_META: Record<
   },
 };
 
+export interface ActionMeta {
+  label: string;
+  cls: string;
+}
+
+// Activity-feed event badges (Overview → Recent activity).  The stream
+// carries FOLLOW / FOLLOWBACK / UNFOLLOWED / DELETED lifecycle events;
+// unknown future event types fall back to a neutral badge.
+export const ACTION_META: Record<string, ActionMeta> = {
+  FOLLOW: {
+    label: "Followed",
+    cls: "bg-accent/10 text-accent border border-accent/30",
+  },
+  FOLLOWBACK: {
+    label: "Followback",
+    cls: "bg-success-subtle text-success-fg border border-success/30",
+  },
+  UNFOLLOWED: {
+    label: "Unfollowed",
+    cls: "bg-danger-subtle text-danger-fg border border-danger/30",
+  },
+  DELETED: {
+    label: "Deleted",
+    cls: "bg-canvas-subtle text-fg-muted border border-border",
+  },
+};
+
+const FALLBACK_ACTION: ActionMeta = {
+  label: "",
+  cls: "bg-canvas-subtle text-fg-muted border border-border",
+};
+
+export function actionMeta(action: string): ActionMeta {
+  const meta = ACTION_META[action];
+  return meta ? meta : { ...FALLBACK_ACTION, label: action };
+}
+
 export const JOB_STATUS_META: Record<
   string,
   { label: string; cls: string; dot: string }
@@ -119,15 +156,30 @@ export function scoreColor(score: number | null | undefined): string {
   return "#57606a";
 }
 
-export const MODE_LABELS: Record<string, { label: string; desc: string }> = {
-  collect: { label: "Full collect", desc: "Discover users + fetch repos" },
-  "collect-users": { label: "Discover users", desc: "Traverse the follower graph" },
-  "collect-users-rep": { label: "Collect repos", desc: "Fetch repos & languages" },
-  "collect-self": { label: "Sync owner", desc: "Refresh your own profile data" },
-  score: { label: "Score", desc: "Score / re-score all users" },
-  follow: { label: "Follow", desc: "Follow top-scored users" },
-  silent: { label: "Silent run", desc: "Stealth collect + score + follow" },
-  snapshot: { label: "Snapshot", desc: "Record today's profile snapshot" },
+// Bot job modes shown in the dashboard launcher.  ``group`` splits them
+// into the single working mode ("main" — silent, which is self-sustaining:
+// it waits for first followers/owner data and grows the follower graph on
+// its own) and the one-off force/backfill modes ("force"), which are only
+// needed for manual interventions.
+export interface ModeMeta {
+  label: string;
+  desc: string;
+  group: "main" | "force";
+}
+
+export const MODE_LABELS: Record<string, ModeMeta> = {
+  silent: {
+    label: "Silent run",
+    desc: "All-in-one: collect + score + follow, runs continuously",
+    group: "main",
+  },
+  collect: { label: "Full collect", desc: "Discover users + fetch repos", group: "force" },
+  "collect-users": { label: "Discover users", desc: "Traverse the follower graph", group: "force" },
+  "collect-users-rep": { label: "Collect repos", desc: "Fetch repos & languages", group: "force" },
+  "collect-self": { label: "Sync owner", desc: "Refresh your own profile data", group: "force" },
+  score: { label: "Score", desc: "Score / re-score all users", group: "force" },
+  follow: { label: "Follow", desc: "Follow top-scored users", group: "force" },
+  snapshot: { label: "Snapshot", desc: "Record today's profile snapshot", group: "force" },
 };
 
 export function jobDuration(job: Job): string {

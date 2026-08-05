@@ -192,13 +192,16 @@ class Collector:
     # Owner profile sync (TTL-based)
     # ------------------------------------------------------------------
 
-    def sync_owner(self):
+    def sync_owner(self, force=False):
         """Re-sync owner repos if the last fetch is older than OWNER_SYNC_DAYS.
 
-        Always runs — but skips the expensive API calls when data is
-        still fresh.  Updates repos_fetched_at on success.
+        *force* bypasses the freshness check — used by the silent-mode
+        first-run gate, which must notice owner repos appearing without
+        waiting out the TTL.  Always runs otherwise — but skips the
+        expensive API calls when data is still fresh.  Updates
+        repos_fetched_at on success.
         """
-        if self.db.is_repos_fresh(MY_USERNAME, days=OWNER_SYNC_DAYS):
+        if not force and self.db.is_repos_fresh(MY_USERNAME, days=OWNER_SYNC_DAYS):
             log.info(
                 "Owner repos are fresh — skipping re-collection."
             )
@@ -305,31 +308,71 @@ class Collector:
     # Phase 1 — incremental graph discovery
     # ------------------------------------------------------------------
 
-    def _discover(self):
+    def _discover(self, max_users=None, sleep_between_users=1.0, stats=None):
         """Discover new users from the follower graph.
 
         For each known non-owner user whose stored follower count is
         less than the current API count, fetch followers and add new
         ones.  Stops pagination early when a full page is already known.
+
+        *max_users* caps the number of users walked in this pass (used by
+        the discovery worker so each pass fits its hourly budget); None
+        (default) walks the whole DB — the legacy --collect-users
+        behaviour.  Users are walked least-recently-scanned first, so
+        consecutive capped passes rotate through the database instead of
+        re-checking the same users every time.
+
+        *sleep_between_users* is the stealth pause taken before every
+        GitHub request, including each pagination page of a follower list
+        (default 1 s — the legacy --collect-users pacing; the discovery
+        worker passes a larger delay so its request rate stays calm and
+        constant regardless of how many users grew).
+
+        *stats* is an optional dict updated incrementally with the pass's
+        running totals (``users_walked``, ``new_users``), so callers can
+        report progress even when the pass is interrupted mid-way.
+
+        Returns
+        -------
+        int
+            Number of newly discovered users (0 if none or interrupted).
         """
         print("Incremental follower discovery ...")
         log.info("Phase 1 started: incremental follower discovery")
 
-        rows = self.db.conn.execute(
-            """
-            SELECT username, followers_count FROM users
-            WHERE owner = 0 AND status != 'DELETED' AND repos_fetched_at IS NOT NULL
-            """
-        ).fetchall()
+        sql = """
+            SELECT u.username, u.followers_count
+            FROM users u
+            LEFT JOIN user_current_status c ON c.username = u.username
+            WHERE u.owner = 0
+              AND COALESCE(c.status, 'NEW') != 'DELETED'
+              AND u.repos_fetched_at IS NOT NULL
+            ORDER BY u.followers_scanned_at ASC NULLS FIRST
+        """
+        params = []
+        if max_users:
+            sql += " LIMIT ?"
+            params.append(max_users)
+        rows = self.db.conn.execute(sql, params).fetchall()
 
         total = len(rows)
         new_total = 0
+        walked = 0
 
         for idx, (username, stored_count) in enumerate(rows, 1):
             if self._shutdown.is_set():
                 log.info("Shutdown requested — stopping discovery.")
                 print("\nShutdown requested — stopping discovery.")
                 break
+
+            walked += 1
+            if stats is not None:
+                stats["users_walked"] = walked
+
+            # ── Stealth pacing: one pause before every API request keeps
+            #    the request rate constant — the calm discovery worker
+            #    relies on this to never exceed its hourly budget ──
+            self._sleep(sleep_between_users)
 
             # ── Fetch current follower count (1 API call) ──
             try:
@@ -362,6 +405,10 @@ class Collector:
                     "Skipping %s: followers %d ≤ stored %d",
                     username, current_count, stored_count,
                 )
+                # Stamp the check time even when nothing changed, so capped
+                # passes rotate past this user instead of re-checking it on
+                # every pass (harmless for the full walk too).
+                self.db.store_followers_count(username, current_count)
                 continue
 
             # ── Follower count grew — fetch and process new followers ──
@@ -371,8 +418,12 @@ class Collector:
                 username, stored_count, current_count,
             )
 
+            # The followers request paginates (100/page) — pace every page
+            # so a large follower count can't burst the request rate.
             try:
-                followers = self.github.followers(username)
+                followers = self.github.followers(
+                    username, pacer=lambda: self._sleep(sleep_between_users),
+                )
             except GitHubAuthError as exc:
                 self._abort_on_auth_error(exc)
                 return
@@ -409,16 +460,22 @@ class Collector:
             if new_count:
                 print(f"  → {new_count} new users from {username}")
                 new_total += new_count
+                if stats is not None:
+                    stats["new_users"] = new_total
             else:
                 log.debug("No new followers for %s", username)
 
-            self._sleep(1)
+        if stats is not None:
+            stats["users_walked"] = walked
+            stats["new_users"] = new_total
 
         if self._shutdown.is_set():
             log.info("Phase 1 interrupted by shutdown.")
         else:
             log.info("Phase 1 finished: %d new users discovered.", new_total)
             print(f"\nDiscovery complete: {new_total} new users.")
+
+        return new_total
 
 
 
@@ -494,11 +551,7 @@ class Collector:
                 continue
 
             if info is None:
-                self.db.conn.execute(
-                    "UPDATE users SET status = 'DELETED' WHERE username = ?",
-                    (username,),
-                )
-                self.db.conn.commit()
+                self.db.mark_deleted(username)
                 log.info("User %s not found — marked DELETED", username)
                 return
 

@@ -279,7 +279,7 @@ export default function UsersPage() {
                         className="text-[12px] font-semibold"
                         style={{ color: scoreColor(u.score) }}
                       >
-                        {u.score}
+                        {u.score ?? "—"}
                       </span>
                     </div>
                   </td>

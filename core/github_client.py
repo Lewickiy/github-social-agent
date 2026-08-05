@@ -335,12 +335,19 @@ class GithubClient:
     # Public helpers
     # --------------------------------------------------
 
-    def followers(self, username):
-        """Return a list of all followers for *username* (paginated)."""
+    def followers(self, username, pacer=None):
+        """Return a list of all followers for *username* (paginated).
+
+        *pacer* is an optional zero-arg callable invoked before every page
+        request — used by the calm graph-discovery worker so pagination
+        pages keep its request rate constant instead of bursting.
+        """
         result = []
         page = 1
 
         while True:
+            if pacer is not None:
+                pacer()
             data = self.request(
                 "GET",
                 f"/users/{username}/followers",

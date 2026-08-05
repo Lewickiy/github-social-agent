@@ -1,7 +1,10 @@
 import type {
   Config,
+  DiscoveryState,
   JobsResponse,
   LanguageOption,
+  MLState,
+  Settings,
   Stats,
   UserProfile,
   UsersResponse,
@@ -31,6 +34,19 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(BASE + path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const b = await res.json().catch(() => null);
+    throw new Error(b?.detail ?? `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 export interface UsersParams {
   q?: string;
   status?: string;
@@ -44,7 +60,8 @@ export interface UsersParams {
 }
 
 export const api = {
-  stats: () => get<Stats>("/stats"),
+  /** Aggregate overview stats; `days` scopes the activity/feed blocks. */
+  stats: (days = 30) => get<Stats>(`/stats?days=${days}`),
   users: (params: UsersParams = {}) => {
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
@@ -56,7 +73,11 @@ export const api = {
   user: (username: string) =>
     get<UserProfile>(`/users/${encodeURIComponent(username)}`),
   languages: () => get<{ items: LanguageOption[] }>("/languages"),
+  ml: () => get<MLState>("/ml"),
+  discovery: () => get<DiscoveryState>("/discovery"),
   config: () => get<Config>("/config"),
+  settings: () => get<Settings>("/settings"),
+  saveSettings: (timezone: string) => put<Settings>("/settings", { timezone }),
   jobs: () => get<JobsResponse>("/jobs"),
   startJob: (mode: string) => post<unknown>("/jobs", { mode }),
   jobLog: (id: number) => get<{ log: string }>(`/jobs/${id}/log`),

@@ -18,7 +18,7 @@ export default function FollowersChart({
   if (data.length === 0) {
     return (
       <div className="h-[220px] w-full flex items-center justify-center text-[13px] text-fg-subtle">
-        No snapshots yet — the daily snapshot runs at 12:00 UTC.
+        No snapshots yet — the daily snapshot runs at 00:00 UTC.
       </div>
     );
   }

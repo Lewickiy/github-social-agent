@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Activity,
@@ -15,31 +15,87 @@ import type { Stats } from "../types";
 import StatCard from "../components/StatCard";
 import FollowersChart from "../components/FollowersChart";
 import { ScoreBars, StatusBars } from "../components/DistributionCharts";
-import { JobStatusBadge } from "../components/StatusBadge";
 import { usePolling } from "../hooks/usePolling";
-import { MODE_LABELS } from "../status";
+import { actionMeta } from "../status";
 import { useRefresh } from "../refresh";
+
+/**
+ * Data window for the interval-dependent blocks (activity count + the
+ * Recent activity feed).  The Followers growth chart is deliberately NOT
+ * scoped by this — it always covers a fixed 30-day snapshot window.
+ */
+export const OVERVIEW_INTERVALS = [
+  { label: "Today", days: 1 },
+  { label: "3 days", days: 3 },
+  { label: "7 days", days: 7 },
+  { label: "15 days", days: 15 },
+  { label: "Month", days: 30 },
+] as const;
+
+const DEFAULT_DAYS = 30;
+const STORAGE_KEY = "github-social-overview-days";
+
+function readStoredDays(): number {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return DEFAULT_DAYS;
+    const days = Number(raw);
+    return OVERVIEW_INTERVALS.some((o) => o.days === days)
+      ? days
+      : DEFAULT_DAYS;
+  } catch {
+    return DEFAULT_DAYS;
+  }
+}
+
+function persistDays(days: number) {
+  try {
+    localStorage.setItem(STORAGE_KEY, String(days));
+  } catch {
+    // Persistence is best-effort (private mode, etc.).
+  }
+}
 
 export default function OverviewPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [days, setDays] = useState<number>(readStoredDays);
   const { intervalMs, intervalLabel } = useRefresh();
+  // Monotonic sequence: only the *latest* in-flight request may commit its
+  // result.  Prevents out-of-order responses when the user quickly switches
+  // intervals (or a poll overlaps a switch) from showing stale data for the
+  // wrong window.
+  const requestSeq = useRef(0);
 
-  const load = async () => {
+  const load = async (activeDays: number) => {
+    const seq = ++requestSeq.current;
     try {
-      setStats(await api.stats());
+      const data = await api.stats(activeDays);
+      if (seq !== requestSeq.current) return; // superseded — drop
+      setStats(data);
       setError(null);
     } catch (e) {
+      if (seq !== requestSeq.current) return;
       setError((e as Error).message);
     }
   };
 
   useEffect(() => {
-    load();
+    load(days);
+    // Initial load only — the selected interval is restored from storage
+    // via the `days` initialiser (the toggle triggers its own reload).
   }, []);
 
   // Auto-refresh on the user-selected cadence (default 1 min, 3s–30m slider).
-  usePolling(load, intervalMs);
+  usePolling(() => load(days), intervalMs);
+
+  const changeInterval = (nextDays: number) => {
+    if (nextDays === days) return;
+    setDays(nextDays);
+    persistDays(nextDays);
+    // Force an immediate refresh with the newly selected window.
+    load(nextDays);
+  };
 
   if (error && !stats) {
     return (
@@ -62,7 +118,7 @@ export default function OverviewPage() {
     return (
       <div className="max-w-[1280px] mx-auto p-6 animate-pulse">
         <div className="h-6 w-48 bg-border-muted rounded mb-4" />
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
           {Array.from({ length: 8 }).map((_, i) => (
             <div key={i} className="card h-[88px]" />
           ))}
@@ -82,36 +138,62 @@ export default function OverviewPage() {
   const t = stats.totals;
   const totalActions = stats.activity.reduce((a, b) => a + b.count, 0);
   const pctLimit = Math.round((stats.today_follows / stats.daily_limit) * 100);
+  const activityLabel =
+    days === 1 ? "Activity today" : `Activity (${days}d)`;
+  const intervalWord = days === 1 ? "today" : `last ${days} days`;
 
   return (
     <div className="max-w-[1280px] mx-auto p-4 md:p-6 space-y-4">
       {/* Title row */}
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
           <h1 className="text-[20px] font-semibold tracking-tight">Overview</h1>
           <p className="text-[13px] text-fg-muted">
             Growth pipeline for{" "}
             <Link to="/users" className="text-accent hover:underline">
               @{stats.owner ?? "your account"}
             </Link>{" "}
-            — auto-refreshes every {intervalLabel}
+            — showing {intervalWord} · auto-refreshes every {intervalLabel}
           </p>
+        </div>
+
+        {/* Data interval toggle — persisted in localStorage */}
+        <div
+          className="flex items-center rounded-md border border-border bg-canvas p-0.5 gap-0.5 flex-wrap"
+          role="group"
+          aria-label="Data interval"
+        >
+          {OVERVIEW_INTERVALS.map((opt) => (
+            <button
+              key={opt.days}
+              type="button"
+              onClick={() => changeInterval(opt.days)}
+              aria-pressed={opt.days === days}
+              className={`px-2.5 py-1 rounded text-[12px] font-medium transition-colors duration-100 select-none cursor-pointer ${
+                opt.days === days
+                  ? "bg-accent-emphasis text-white"
+                  : "text-fg-muted hover:text-fg hover:bg-canvas-subtle"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
       </div>
 
       {/* KPI cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
         <StatCard
           label="Users discovered"
           value={t.total}
           icon={<Users size={16} />}
-          sub={`${t.new} new in queue`}
+          sub={`${t.queue.toLocaleString()} awaiting processing`}
         />
         <StatCard
           label="Scored"
           value={t.scored}
           icon={<Target size={16} />}
-          sub={`${t.total > 0 ? Math.round((t.scored / t.total) * 100) : 0}% of pipeline`}
+          sub={`${t.scored_positive.toLocaleString()} with score > 0`}
         />
         <StatCard
           label="Followed"
@@ -132,19 +214,15 @@ export default function OverviewPage() {
           }
         />
         <StatCard
-          label="Today's follows"
-          value={
-            <span>
-              {stats.today_follows}
-              <span className="text-[14px] text-fg-subtle font-normal">
-                {" "}
-                / {stats.daily_limit}
-              </span>
-            </span>
-          }
+          label="Follows"
+          value={totalActions}
           icon={<TrendingUp size={16} />}
           accent={pctLimit >= 90 ? "danger" : pctLimit >= 70 ? "attention" : "default"}
-          sub={stats.followers_count != null ? `${stats.followers_count} followers now` : "no follower snapshot yet"}
+          sub={`${stats.today_follows}/${stats.daily_limit} today · ${
+            stats.followers_count != null
+              ? `${stats.followers_count} followers now`
+              : "no follower snapshot yet"
+          }`}
         />
         <StatCard
           label="ML followback candidates"
@@ -154,14 +232,25 @@ export default function OverviewPage() {
           sub="predicted likely to follow back"
         />
         <StatCard
-          label="Activity (30d)"
-          value={totalActions}
+          label={activityLabel}
+          value={stats.total_actions}
           icon={<Activity size={16} />}
-          sub="follow actions logged"
+          sub="lifecycle events logged"
         />
+        {/* The bold figure always reports the live per-hour request rate and
+            its share of the hourly quota — regardless of the selected interval.
+            The sub-line then shows the interval-scoped total. */}
         <StatCard
-          label="GitHub API requests / hour"
-          value={stats.github_usage.requests_last_hour}
+          label="GitHub API requests"
+          value={
+            <span className="inline-flex items-baseline gap-x-1.5 flex-wrap">
+              {stats.github_usage.requests_last_hour.toLocaleString()}
+              <span className="text-[13px] font-medium text-fg-muted whitespace-nowrap">
+                /hr · {stats.github_usage.percent_last_hour}% of{" "}
+                {stats.github_usage.rate_limit.toLocaleString()}/hr limit
+              </span>
+            </span>
+          }
           icon={<Gauge size={16} />}
           accent={
             stats.github_usage.percent_last_hour >= 90
@@ -170,15 +259,15 @@ export default function OverviewPage() {
               ? "attention"
               : "default"
           }
-          sub={`${stats.github_usage.requests_today} today · ${stats.github_usage.percent_last_hour}% of ${stats.github_usage.rate_limit.toLocaleString()}/hr limit`}
+          sub={`${(stats.github_usage.requests_in_window ?? 0).toLocaleString()} requests ${intervalWord}`}
           hint={`${stats.github_usage.requests_total.toLocaleString()} requests logged total`}
         />
       </div>
 
       {/* Followers growth + Pipeline status — one row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="card p-4">
-          <div className="flex items-center justify-between mb-2">
+        <div className="card p-4 min-w-0">
+          <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
             <div>
               <h2 className="text-[14px] font-semibold">Followers growth</h2>
               <p className="text-[12px] text-fg-muted">
@@ -194,17 +283,17 @@ export default function OverviewPage() {
           <FollowersChart data={stats.followers_history} />
         </div>
 
-        <div className="card p-4">
+        <div className="card p-4 min-w-0">
           <h2 className="text-[14px] font-semibold mb-1">Pipeline status</h2>
           <p className="text-[12px] text-fg-muted mb-2">
-            Users by lifecycle status
+            Users entering each status · {intervalWord}
           </p>
           <StatusBars data={stats.status_distribution} />
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="card p-4">
+        <div className="card p-4 min-w-0">
           <h2 className="text-[14px] font-semibold mb-1">Score distribution</h2>
           <p className="text-[12px] text-fg-muted mb-2">
             Where the pipeline sits
@@ -212,8 +301,8 @@ export default function OverviewPage() {
           <ScoreBars data={stats.score_buckets} />
         </div>
 
-        {/* Recent actions + jobs */}
-        <div className="card p-4 lg:col-span-2">
+        {/* Recent activity — lifecycle event stream (no job info here) */}
+        <div className="card p-4 lg:col-span-2 min-w-0">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-[14px] font-semibold">Recent activity</h2>
             <Link to="/manage" className="text-[12px] text-accent hover:underline">
@@ -223,7 +312,7 @@ export default function OverviewPage() {
           <div className="divide-y divide-border-muted">
             {stats.recent_actions.length === 0 && (
               <div className="py-6 text-center text-[13px] text-fg-subtle">
-                No actions yet — start a{" "}
+                No actions in this interval yet — start a{" "}
                 <Link to="/manage" className="text-accent hover:underline">
                   job
                 </Link>{" "}
@@ -233,46 +322,34 @@ export default function OverviewPage() {
                 </code>
               </div>
             )}
-            {stats.recent_actions.slice(0, 6).map((a, i) => (
-              <div key={i} className="py-2 flex items-center gap-2.5">
-                <span className="badge bg-canvas-subtle text-fg-muted border border-border">
-                  {a.action}
-                </span>
-                <a
-                  href={`https://github.com/${a.username}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-[13px] font-medium text-accent hover:underline"
+            {stats.recent_actions.slice(0, 6).map((a, i) => {
+              const meta = actionMeta(a.action);
+              return (
+                <div
+                  key={`${a.created_at}-${i}`}
+                  className="py-2 flex items-center gap-2.5 min-w-0"
                 >
-                  {a.username}
-                </a>
-                <span className="ml-auto text-[12px] text-fg-subtle shrink-0">
-                  {timeAgo(a.created_at)}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          {stats.jobs.length > 0 && (
-            <div className="mt-3 pt-3 border-t border-border">
-              <h3 className="text-[12px] font-semibold text-fg-muted mb-1.5 uppercase tracking-wide">
-                Latest jobs
-              </h3>
-              <div className="flex flex-wrap gap-1.5">
-                {stats.jobs.slice(0, 6).map((j) => (
-                  <Link
-                    key={j.id}
-                    to="/manage"
-                    className="badge bg-canvas-subtle border border-border text-fg-muted hover:border-accent hover:text-accent transition-colors"
-                    title={j.error ?? undefined}
+                  <span
+                    className={`badge ${meta.cls} shrink-0`}
+                    title={a.action}
                   >
-                    #{j.id} {MODE_LABELS[j.mode]?.label ?? j.mode}
-                    <JobStatusBadge status={j.status} />
-                  </Link>
-                ))}
-              </div>
-            </div>
-          )}
+                    {meta.label}
+                  </span>
+                  <a
+                    href={`https://github.com/${a.username}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[13px] font-medium text-accent hover:underline truncate min-w-0"
+                  >
+                    {a.username}
+                  </a>
+                  <span className="ml-auto text-[12px] text-fg-subtle shrink-0">
+                    {timeAgo(a.created_at)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
     </div>

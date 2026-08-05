@@ -1,25 +1,41 @@
-"""Silent-mode runner — collect repos + score users with human-like delays.
+"""Silent-mode runner — the bot's single working mode.
 
-Designed to look like individual user browsing, not a mass crawl.
-All delays are configurable in config.py (SILENT_* settings).
+Collects repos + scores users with human-like delays, and is designed to
+look like individual user browsing, not a mass crawl.  All delays are
+configurable in config.py (SILENT_* settings).
+
+On top of the legacy one-shot behaviour it now:
+  * waits for first-run readiness (``SILENT_GATES_ENABLED``) — at least
+    one follower and enough owner repo data — instead of finishing with
+    "Processing 0 users";
+  * when ``SILENT_CONTINUOUS`` is True (default) it never exits: after
+    draining its queue it polls for new owner followers and waits for new
+    work instead of stopping.  Follower-graph growth (new users beyond
+    the owner's followers) is handled by a separate calm background
+    worker (``workers/graph_discovery_worker.py``, ≤ DISCOVERY_*
+    requests/hour), so ``--collect*`` / ``--score`` / ``--follow`` are
+    only needed as one-off force/backfill modes.
 """
 
 import random
 import threading
 import time
-from datetime import datetime, timezone
 
 from core.config import (
     DAILY_FOLLOW_LIMIT,
     ML_ENABLED,
     OWNER_FOLLOWER_SCAN_INTERVAL,
     READ_HEAVY_FORK_LANGUAGES,
+    SILENT_CONTINUOUS,
     SILENT_DELAY_BETWEEN_USERS,
     SILENT_DELAY_BETWEEN_REPOS,
     SILENT_DELAY_BETWEEN_REQUESTS,
     SILENT_DELAY_BETWEEN_SCORES,
     SILENT_DELAY_BETWEEN_FOLLOWS,
     SILENT_FOLLOW_SCORE_THRESHOLD,
+    SILENT_GATE_CHECK_INTERVAL_SECONDS,
+    SILENT_GATES_ENABLED,
+    SILENT_MIN_OWNER_REPOS,
     SILENT_PRIORITIZE_SMALL,
     SILENT_REPO_CHECK_FRESHNESS_DAYS,
     SKIP_FORK_LANGUAGES,
@@ -231,11 +247,7 @@ class SilentRunner:
                 continue
 
             if info is None:
-                self.db.conn.execute(
-                    "UPDATE users SET status = 'DELETED' WHERE username = ?",
-                    (username,),
-                )
-                self.db.conn.commit()
+                self.db.mark_deleted(username)
                 log.info("User %s not found — marked DELETED", username)
                 print(f"  👻 {username} — deleted, skipped")
                 return
@@ -556,14 +568,10 @@ class SilentRunner:
         try:
             if self.github.already_following(username):
                 # Mark as FOLLOWED so they don't stay in the queue forever.
-                now = datetime.now(timezone.utc).isoformat()
-                self.db.conn.execute(
-                    """UPDATE users
-                       SET status = 'FOLLOWED', followed_at = ?
-                       WHERE username = ?""",
-                    (now, username),
-                )
-                self.db.conn.commit()
+                # Uses the dedicated method (no FOLLOW action — this is a
+                # re-confirmation, not a new follow, so the daily-follow
+                # counter and activity feed stay accurate).
+                self.db.mark_followed_existing(username)
                 log.debug("Already following %s — marked FOLLOWED", username)
                 print(f"    👤 Already following {username}")
                 return False
@@ -616,11 +624,157 @@ class SilentRunner:
                 return
 
     # ------------------------------------------------------------------
+    # First-run gates & self-sustaining helpers
+    # ------------------------------------------------------------------
+
+    def _load_owner_profile(self, owner_username):
+        """Return (owner_langs, owner_topics) for similarity scoring."""
+        if not owner_username:
+            return None, None
+        owner_langs = {
+            name: pct
+            for name, pct in self.db.user_languages(owner_username)
+        }
+        owner_topics = self.db.user_topics(owner_username)
+        log.info("Owner profile loaded for scoring: %s", owner_username)
+        return owner_langs, owner_topics
+
+    def _load_ml_model(self):
+        """Load the ML model once for the whole run.  Returns (model, meta)."""
+        ml_model = None
+        ml_meta = None
+        if ML_ENABLED:
+            try:
+                from ml_service.inference import load_model
+                ml_model, ml_meta = load_model()
+                if ml_model is not None:
+                    log.info("ML model loaded for silent inference.")
+                else:
+                    log.debug("No ML model available — inference disabled.")
+            except Exception:
+                log.exception("Failed to load ML model")
+        return ml_model, ml_meta
+
+    def _queue_size(self):
+        """Count users currently awaiting silent processing (DB-only)."""
+        return self.db.count_silent_processing_queue()
+
+    def _owner_data_ready(self):
+        """True when the owner has enough collected data for meaningful scoring."""
+        owner = self.db.get_owner()
+        if not owner:
+            return False
+        return self.db.user_repo_count(owner) >= SILENT_MIN_OWNER_REPOS
+
+    def _blocked_reason(self):
+        """Return the first unmet gate as (reason, detail), or (None, None).
+
+        ``reason`` is one of:
+          * ``"followers"`` — nothing to process (no users at all, or the
+            whole queue is drained);
+          * ``"owner_data"`` — the owner lacks enough collected repos for
+            the similarity half of the score to mean anything.
+        """
+        if self._queue_size() == 0:
+            return "followers", (
+                "No users to process — the network needs at least one "
+                "follower.  New owner followers are picked up automatically, "
+                "then the follower graph is walked for growth."
+            )
+        if not self._owner_data_ready():
+            return "owner_data", (
+                f"Owner has fewer than {SILENT_MIN_OWNER_REPOS} collected "
+                f"repo(s) — not enough data for meaningful scoring (scores "
+                f"would cap at 35/100).  Set SILENT_GATES_ENABLED=False in "
+                f"core/config.py to score anyway."
+            )
+        return None, None
+
+    def _wait_for_work(self, worker_index):
+        """Block until the silent queue has work (or shutdown is requested).
+
+        Used both before the first batch (first-run gates) and between
+        batches in continuous mode.  While blocked, worker 0 polls GitHub
+        on a fixed cadence:
+          * new owner followers are scanned every cycle (they enter the
+            queue as soon as they appear);
+          * the owner profile is force re-synced only while the owner-data
+            gate is the blocker and ``SILENT_GATES_ENABLED``, and only
+            once the profile's ``public_repos`` suggests data may now
+            exist — a full forced re-sync (profile + all repos + languages)
+            every cycle would be wasteful.
+        Follower-graph growth is the GraphDiscoveryWorker's job — silent
+        never walks the graph itself.  Other workers only re-check the DB
+        each cycle.
+        """
+        if self._shutdown.is_set():
+            return
+
+        reason, detail = self._blocked_reason()
+        if reason is None:
+            return
+
+        if SILENT_GATES_ENABLED:
+            print("\n⏸  Waiting for work:")
+            print(f"  ⚠ {detail}")
+            last_reason = reason
+        else:
+            print("  ⏳ No users to process — polling for new followers ...")
+            last_reason = None
+
+        while not self._shutdown.is_set():
+            reason, detail = self._blocked_reason()
+            if reason is None:
+                if SILENT_GATES_ENABLED:
+                    print("  ✅ Ready — resuming.\n")
+                return
+            if SILENT_GATES_ENABLED and reason != last_reason:
+                print(f"  ⚠ {detail}")
+                last_reason = reason
+
+            if worker_index == 0:
+                collector = Collector(self.db, self.github, self._shutdown)
+                if SILENT_GATES_ENABLED and reason == "owner_data":
+                    # Cheap check first: a full forced re-sync (profile +
+                    # all repos + languages) is expensive, so only run it
+                    # once the profile suggests data may now exist.
+                    owner = self.db.get_owner()
+                    if owner:
+                        try:
+                            info = self.github.user(owner)
+                        except GitHubAuthError as exc:
+                            self._abort_on_auth_error(exc)
+                            break
+                        except (GitHubNetworkError, GitHubRateLimitError):
+                            info = None
+                        if (
+                            info is not None
+                            and (info.get("public_repos") or 0)
+                            >= SILENT_MIN_OWNER_REPOS
+                        ):
+                            collector.sync_owner(force=True)
+                else:  # queue drained — poll for new owner followers
+                    collector.scan_owner_followers(verbose=False)
+
+            if not self._sleep(SILENT_GATE_CHECK_INTERVAL_SECONDS):
+                break
+
+    # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
     def run(self, worker_index=0, worker_count=1):
         """Collect repos + score per user — all with stealth delays.
+
+        Single working mode of the bot.  When ``SILENT_GATES_ENABLED`` the
+        run first waits until the account can do meaningful work (at least
+        one follower and ``SILENT_MIN_OWNER_REPOS`` owner repos).  When
+        ``SILENT_CONTINUOUS`` (default) the run never exits: after draining
+        its queue it polls for new owner followers and waits for new work
+        instead of stopping.  Follower-graph growth is handled by the
+        separate GraphDiscoveryWorker (started from main.py) — so
+        --collect* / --score / --follow are only needed as one-off
+        force/backfill modes.
 
         Also periodically checks for new owner followers and processes
         them with priority.
@@ -637,42 +791,17 @@ class SilentRunner:
         """
         log.info("Silent mode started (worker %d/%d).", worker_index + 1, worker_count)
 
-        # Load owner data once for the similarity comparison
+        # ── First-run gates: wait until the account can do meaningful work ──
+        if SILENT_GATES_ENABLED:
+            self._wait_for_work(worker_index)
+
+        # Load owner data for the similarity comparison (it may have changed
+        # while the gates were waiting).
         owner_username = self.db.get_owner()
-        owner_langs = None
-        owner_topics = None
-        if owner_username:
-            owner_langs = {
-                name: pct
-                for name, pct in self.db.user_languages(owner_username)
-            }
-            owner_topics = self.db.user_topics(owner_username)
-            log.info("Owner profile loaded for scoring: %s", owner_username)
-
-        rows = self.db.users_for_silent_processing(
-            prioritize_small=SILENT_PRIORITIZE_SMALL,
-        )
-        # Split the queue across parallel workers — disjoint slices.
-        if worker_count > 1:
-            rows = rows[worker_index::worker_count]
-
-        total = len(rows)
-        print(f"Processing {total} users (silent) ...")
-        log.info("Silent processing: %d users", total)
+        owner_langs, owner_topics = self._load_owner_profile(owner_username)
 
         # ── Load ML model ONCE before the main loop ──
-        ml_model = None
-        ml_meta = None
-        if ML_ENABLED:
-            try:
-                from ml_service.inference import load_model
-                ml_model, ml_meta = load_model()
-                if ml_model is not None:
-                    log.info("ML model loaded for silent inference.")
-                else:
-                    log.debug("No ML model available — inference disabled.")
-            except Exception:
-                log.exception("Failed to load ML model")
+        ml_model, ml_meta = self._load_ml_model()
 
         # ── Periodic owner follower scanner (worker 0 only — other
         #    workers skip it to avoid duplicate owner scans) ──
@@ -680,80 +809,110 @@ class SilentRunner:
             Collector(self.db, self.github, self._shutdown)
             if worker_index == 0 else None
         )
-        owner_scan_counter = 0
 
-        for idx, (username,) in enumerate(rows, 1):
-            if self._shutdown.is_set():
-                print("\nShutdown requested.")
-                break
+        while not self._shutdown.is_set():
+            rows = self.db.users_for_silent_processing(
+                prioritize_small=SILENT_PRIORITIZE_SMALL,
+            )
+            # Split the queue across parallel workers — disjoint slices.
+            if worker_count > 1:
+                rows = rows[worker_index::worker_count]
 
-            # ═══════════════════════════════════════════════════════════
-            # PERIODIC SCAN: check for new owner followers every N users
-            # ═══════════════════════════════════════════════════════════
-            if (
-                periodic_collector is not None
-                and owner_scan_counter >= OWNER_FOLLOWER_SCAN_INTERVAL
-            ):
-                owner_scan_counter = 0
-                new_followers = periodic_collector.scan_owner_followers(verbose=False)
-                if new_followers:
-                    log.info(
-                        "Silent: %d new owner follower(s) discovered — processing immediately",
-                        len(new_followers),
-                    )
-                    print(f"  ★ {len(new_followers)} new owner follower(s) — processing now")
-                    for pu_idx, pu in enumerate(new_followers, 1):
-                        if self._shutdown.is_set():
-                            break
-                        # Process new owner follower with priority display
-                        self._collect_user_repos(pu, pu_idx, len(new_followers))
-                        if not self._shutdown.is_set():
-                            pu_score = self._score_user(
-                                pu, owner_langs, owner_topics,
-                                ml_model=ml_model, ml_meta=ml_meta,
-                            )
-                            if (
-                                pu_score is not None
-                                and pu_score > SILENT_FOLLOW_SCORE_THRESHOLD
-                                and not self._shutdown.is_set()
-                            ):
-                                self._follow_user(pu, pu_score)
-                                if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
-                                    break
-                            # Always drain queue after each owner follower
-                            # (harmless if limit exhausted — _follow_user checks)
-                            self._drain_follow_queue()
-            owner_scan_counter += 1
-
-            # --- Collect repos for this user (with TTL skip) ---
-            self._collect_user_repos(username, idx, total)
-
-            # --- Immediately score this user ---
-            if not self._shutdown.is_set():
-                score = self._score_user(
-                    username, owner_langs, owner_topics,
-                    ml_model=ml_model, ml_meta=ml_meta,
+            total = len(rows)
+            if total:
+                print(f"Processing {total} users (silent) ...")
+                log.info("Silent processing: %d users", total)
+            else:
+                log.debug(
+                    "Silent: queue empty%s",
+                    " — waiting for new work" if SILENT_CONTINUOUS else "",
                 )
 
-                # --- Auto-follow if score is high enough ---
+            owner_scan_counter = 0
+            for idx, (username,) in enumerate(rows, 1):
+                if self._shutdown.is_set():
+                    print("\nShutdown requested.")
+                    break
+
+                # ═══════════════════════════════════════════════════════════
+                # PERIODIC SCAN: check for new owner followers every N users
+                # ═══════════════════════════════════════════════════════════
                 if (
-                    score is not None
-                    and score > SILENT_FOLLOW_SCORE_THRESHOLD
-                    and not self._shutdown.is_set()
+                    periodic_collector is not None
+                    and owner_scan_counter >= OWNER_FOLLOWER_SCAN_INTERVAL
                 ):
-                    self._follow_user(username, score)
-                    if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
-                        break
-                # Drain queue before moving to next user (FIFO)
-                # (harmless if limit exhausted — _follow_user checks internally)
+                    owner_scan_counter = 0
+                    new_followers = periodic_collector.scan_owner_followers(verbose=False)
+                    if new_followers:
+                        log.info(
+                            "Silent: %d new owner follower(s) discovered — processing immediately",
+                            len(new_followers),
+                        )
+                        print(f"  ★ {len(new_followers)} new owner follower(s) — processing now")
+                        for pu_idx, pu in enumerate(new_followers, 1):
+                            if self._shutdown.is_set():
+                                break
+                            # Process new owner follower with priority display
+                            self._collect_user_repos(pu, pu_idx, len(new_followers))
+                            if not self._shutdown.is_set():
+                                pu_score = self._score_user(
+                                    pu, owner_langs, owner_topics,
+                                    ml_model=ml_model, ml_meta=ml_meta,
+                                )
+                                if (
+                                    pu_score is not None
+                                    and pu_score > SILENT_FOLLOW_SCORE_THRESHOLD
+                                    and not self._shutdown.is_set()
+                                ):
+                                    self._follow_user(pu, pu_score)
+                                    if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
+                                        break
+                                # Always drain queue after each owner follower
+                                # (harmless if limit exhausted — _follow_user checks)
+                                self._drain_follow_queue()
+                owner_scan_counter += 1
+
+                # --- Collect repos for this user (with TTL skip) ---
+                self._collect_user_repos(username, idx, total)
+
+                # --- Immediately score this user ---
+                if not self._shutdown.is_set():
+                    score = self._score_user(
+                        username, owner_langs, owner_topics,
+                        ml_model=ml_model, ml_meta=ml_meta,
+                    )
+
+                    # --- Auto-follow if score is high enough ---
+                    if (
+                        score is not None
+                        and score > SILENT_FOLLOW_SCORE_THRESHOLD
+                        and not self._shutdown.is_set()
+                    ):
+                        self._follow_user(username, score)
+                        if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
+                            break
+                    # Drain queue before moving to next user (FIFO)
+                    # (harmless if limit exhausted — _follow_user checks internally)
+                    self._drain_follow_queue()
+
+                if not self._sleep(SILENT_DELAY_BETWEEN_USERS):
+                    break
+
+            # ── Drain the follow queue for this batch ──
+            if not self._shutdown.is_set():
                 self._drain_follow_queue()
 
-            if not self._sleep(SILENT_DELAY_BETWEEN_USERS):
+            if self._shutdown.is_set():
                 break
 
-        # ── Final drain: follow any remaining queued users ──
-        if not self._shutdown.is_set():
-            self._drain_follow_queue()
+            if not SILENT_CONTINUOUS:
+                break
+
+            if total == 0:
+                # Queue drained — wait (gates/polling) for new work instead
+                # of exiting.  Graph growth is the GraphDiscoveryWorker's
+                # job; silent itself only polls for new owner followers.
+                self._wait_for_work(worker_index)
 
         if self._shutdown.is_set():
             log.info("Silent mode interrupted by shutdown.")
