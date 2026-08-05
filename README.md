@@ -80,7 +80,7 @@ Simply "switch it on" once — and watch your GitHub network grow in a targeted,
 - **Parallel processing** — up to `SILENT_WORKERS` threads (2 by default) split the user queue, speeding up processing several times while keeping pauses between actions.
 - **Calm graph-growth worker** — a separate background thread walks the follower graph with a fixed budget of ≤ 500 requests/hour without disturbing the main processing.
 - **0-100 scoring by similarity to your stack** — languages (histogram intersection), topics (Jaccard index), repository freshness.
-- **ML followback prediction** — a PyTorch network, class-balanced loss, early stopping, 5-fold cross-validation, reproducible seed; retrained on startup and every 24 hours.
+- **ML follow-back prediction (shadow mode)** — an experimental PyTorch model that learns from historical follow-back data and evaluates its predictions on live data. The model currently operates in shadow mode: it does not influence production decisions, which are still fully controlled by the deterministic scoring algorithm.
 - **Stealth mode** — human-like delays with jitter; `/languages` is skipped for forks and heavyweight repositories (protection against secondary rate limits).
 - **GitHub rate-limit resilience** — retries driven by server hints (`Retry-After` / `X-RateLimit-Reset`), cooldown, and an immediate stop on an invalid token.
 - **API request economy** — ETag conditional requests (304 = free), data freshness TTLs (repos, scores, follower scans, languages).
