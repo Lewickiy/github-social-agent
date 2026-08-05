@@ -98,24 +98,43 @@ Simply "switch it on" once — and watch your GitHub network grow in a targeted,
 ```mermaid
 flowchart LR
     A[Owner account] --> B[Follower-graph discovery<br/>GraphDiscoveryWorker ≤500 req/h]
-    B --> C[Data collection:<br/>repos · languages · topics · profile]
-    C --> D[Scoring 0-100<br/>similarity to owner's stack]
-    C --> E[ML prediction<br/>followback probability]
-    D --> F[Follow the best candidates<br/>within the daily limit]
-    E --> F
-    F --> G[Followback detection]
-    G --> H[Mutual-follow monitoring<br/>+ daily snapshots + ML retraining]
+
+    B --> C[Data collection<br/>repos · languages · topics · profile]
+
+    C --> D[Deterministic scoring<br/>0-100]
+
+    D --> E[Follow decision<br/>daily limit & delays]
+
+    E --> F[Followback detection]
+
+    F --> G[ML training<br/>historical followback data]
+
+    G --> H[Followback predictions<br/>whole database]
+
+    H -. future ranking signal .-> D
+
+    F --> I[Maintenance<br/>snapshots · companies · monitoring]
 ```
 
 ### Stages
 
-1. **Discovery.** Starting from your account, the system walks the follower graph: first your followers, then their followers, and so on. The growth worker operates "calmly" — one bounded pass per hour, so it never creates bursts of API traffic.
-2. **Data collection.** For every user, the system fetches repositories, languages (with weights in %), topics, and the full profile. ETag conditional requests are used: if nothing changed, GitHub replies 304 and the request does not consume the limit.
-3. **Scoring.** Each candidate gets a 0-100 score: up to 35 points for base profile metrics (repositories, followers, bio) and up to 65 for similarity to your own stack. The owner's profile is synced automatically on every startup.
-4. **ML prediction.** The neural network estimates the probability that the candidate will follow back. The model is trained on your own followback history, retrained every 24 hours, and after each retraining recomputes predictions for the whole database.
-5. **Following.** Candidates with a score above the threshold get followed — carefully, with pauses and within the daily limit.
-6. **Maintenance.** Background workers watch mutual follows (who unfollowed), keep daily metric snapshots, and enrich company data.
+1. **Discovery.** Starting from your account, the system gradually traverses the follower graph: first your followers, then their followers, and so on. A dedicated graph-growth worker performs one bounded pass per hour, ensuring steady discovery without generating bursts of API traffic.
 
+2. **Data collection.** For every discovered user, the bot collects profile information, repositories, language statistics, and repository topics. GitHub ETag conditional requests are used whenever possible: unchanged resources return `304 Not Modified` and do not consume the rate limit.
+
+3. **Deterministic scoring.** Every candidate receives a transparent 0–100 score based on profile quality and similarity to the owner's technology stack. This score is currently the production decision engine used for automatic following.
+
+4. **Following.** Candidates whose score exceeds the configured threshold are followed automatically. Human-like delays, daily limits, cooldowns, and GitHub rate-limit handling ensure safe long-running operation.
+
+5. **ML training and evaluation.** Independently from the production pipeline, the system continuously learns from historical followback outcomes. The PyTorch model is retrained on startup and every 24 hours, after which followback probabilities are recomputed for every candidate and stored for analysis.
+
+6. **Maintenance.** Background workers monitor mutual follows, detect users who unfollow, create daily growth snapshots, enrich organization information, and keep the database up to date.
+
+> **Current status**
+>
+> The deterministic scoring algorithm is currently responsible for follow decisions.
+> ML predictions are generated, evaluated, and continuously improved in parallel.
+> Once sufficient real-world validation has been collected, the model will become an additional ranking signal for candidate selection.
 ---
 
 ## Web Dashboard: User Experience
