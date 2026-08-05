@@ -10,12 +10,13 @@ import {
     Play,
     RefreshCw,
     Settings2,
+    Waypoints,
 } from "lucide-react";
 import {api, formatDate, timeAgo} from "../api";
-import type {Config, Job, Settings} from "../types";
+import type {Config, DiscoveryState, Job, Settings} from "../types";
 import {JobStatusBadge} from "../components/StatusBadge";
 import {usePolling} from "../hooks/usePolling";
-import {jobDuration, MODE_LABELS} from "../status";
+import {jobDuration, MODE_LABELS, type ModeMeta} from "../status";
 import {REFRESH_OPTIONS, useRefresh} from "../refresh";
 import {detectSystemTimezone, formatOffset, TIMEZONE_OPTIONS,} from "../timezones";
 
@@ -23,6 +24,7 @@ export default function ManagementPage() {
     const {intervalMs, intervalLabel, optionIndex, setIntervalMs} = useRefresh();
     const [jobs, setJobs] = useState<Job[]>([]);
     const [config, setConfig] = useState<Config | null>(null);
+    const [discovery, setDiscovery] = useState<DiscoveryState | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [starting, setStarting] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
@@ -34,9 +36,14 @@ export default function ManagementPage() {
 
     const load = useCallback(async () => {
         try {
-            const [j, c] = await Promise.all([api.jobs(), api.config()]);
+            const [j, c, d] = await Promise.all([
+                api.jobs(),
+                api.config(),
+                api.discovery(),
+            ]);
             setJobs(j.items);
             setConfig(c);
+            setDiscovery(d);
             setError(null);
         } catch (e) {
             setError((e as Error).message);
@@ -125,6 +132,42 @@ export default function ManagementPage() {
             setStarting(null);
             setBusy(false);
         }
+    };
+
+    // Single working mode (silent) is the star of the launcher; the rest
+    // are one-off force/backfill modes kept under a collapsible section.
+    const mainModes = Object.entries(MODE_LABELS).filter(([, m]) => m.group === "main");
+    const forceModes = Object.entries(MODE_LABELS).filter(([, m]) => m.group === "force");
+
+    const modeButton = (mode: string, meta: ModeMeta) => {
+        const isRunning = running.some((j) => j.mode === mode);
+        return (
+            <button
+                key={mode}
+                disabled={busy}
+                onClick={() => startJob(mode)}
+                className="w-full flex items-center gap-3 p-2.5 rounded-md border border-border bg-canvas-subtle/50 hover:border-success/50 hover:bg-success-subtle/40 transition-colors group disabled:opacity-60 disabled:cursor-not-allowed text-left"
+            >
+                <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                        isRunning ? "bg-accent animate-pulse" : "bg-fg-subtle group-hover:bg-success"
+                    }`}
+                />
+                <span className="flex-1 min-w-0">
+                    <span className="block text-[13px] font-medium">
+                        {meta.label}
+                    </span>
+                    <span className="block text-[12px] text-fg-muted">
+                        {meta.desc}
+                    </span>
+                </span>
+                {starting === mode ? (
+                    <RefreshCw size={15} className="animate-spin text-fg-subtle"/>
+                ) : (
+                    <Play size={15} className="text-fg-subtle group-hover:text-success"/>
+                )}
+            </button>
+        );
     };
 
     const toggleLog = async (id: number) => {
@@ -281,36 +324,20 @@ export default function ManagementPage() {
                     )}
 
                     <div className="space-y-1.5">
-                        {Object.entries(MODE_LABELS).map(([mode, meta]) => {
-                            const isRunning = running.some((j) => j.mode === mode);
-                            return (
-                                <button
-                                    key={mode}
-                                    disabled={busy}
-                                    onClick={() => startJob(mode)}
-                                    className="w-full flex items-center gap-3 p-2.5 rounded-md border border-border bg-canvas-subtle/50 hover:border-success/50 hover:bg-success-subtle/40 transition-colors group disabled:opacity-60 disabled:cursor-not-allowed text-left"
-                                >
-                  <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${
-                          isRunning ? "bg-accent animate-pulse" : "bg-fg-subtle group-hover:bg-success"
-                      }`}
-                  />
-                                    <span className="flex-1 min-w-0">
-                    <span className="block text-[13px] font-medium">
-                      {meta.label}
-                    </span>
-                    <span className="block text-[12px] text-fg-muted">
-                      {meta.desc}
-                    </span>
-                  </span>
-                                    {starting === mode ? (
-                                        <RefreshCw size={15} className="animate-spin text-fg-subtle"/>
-                                    ) : (
-                                        <Play size={15} className="text-fg-subtle group-hover:text-success"/>
-                                    )}
-                                </button>
-                            );
-                        })}
+                        {mainModes.map(([mode, meta]) => modeButton(mode, meta))}
+
+                        <details className="group/force mt-2">
+                            <summary className="flex items-center justify-between text-[12px] text-fg-subtle hover:text-fg-muted cursor-pointer select-none py-1">
+                                <span>Force / backfill modes</span>
+                                <ChevronDown
+                                    size={14}
+                                    className="transition-transform group-open/force:rotate-180"
+                                />
+                            </summary>
+                            <div className="space-y-1.5 mt-1.5">
+                                {forceModes.map(([mode, meta]) => modeButton(mode, meta))}
+                            </div>
+                        </details>
                     </div>
 
                     <p className="mt-3 text-[12px] text-fg-subtle">
@@ -469,6 +496,125 @@ export default function ManagementPage() {
                 </div>
             </div>
 
+            {/* Graph discovery worker activity */}
+            <div className="card p-4">
+                <div className="flex items-center gap-2 mb-1">
+                    <Waypoints size={15} className="text-accent"/>
+                    <h2 className="text-[14px] font-semibold">Graph discovery worker</h2>
+                    {discovery && (
+                        <span
+                            className={`ml-auto badge border ${
+                                discovery.enabled
+                                    ? "bg-success-subtle text-success-fg border-success/30"
+                                    : "bg-canvas-subtle text-fg-muted border-border"
+                            }`}
+                        >
+                            {discovery.enabled ? "Enabled" : "Disabled"}
+                        </span>
+                    )}
+                </div>
+                <p className="text-[12px] text-fg-muted mb-3">
+                    Calm background worker that walks the follower graph at a constant
+                    rate to grow the network — one bounded pass per hour window, so it
+                    never interferes with silent-mode processing.
+                </p>
+
+                {!discovery ? (
+                    <div className="text-[13px] text-fg-subtle">Loading…</div>
+                ) : !discovery.enabled ? (
+                    <div className="text-[13px] text-fg-subtle">
+                        Worker is disabled — set{" "}
+                        <code className="font-mono">DISCOVERY_WORKER_ENABLED=True</code> in{" "}
+                        <code className="font-mono">core/config.py</code> to grow the
+                        network automatically.
+                    </div>
+                ) : !discovery.last_run ? (
+                    <div className="text-[13px] text-fg-subtle">
+                        No passes recorded yet — the worker records one row per pass after
+                        the first hour window.
+                    </div>
+                ) : (
+                    <>
+                        {/* Hourly budget usage of the last pass */}
+                        <div className="mb-3">
+                            <div className="flex items-center justify-between text-[12px] mb-1">
+                                <span className="text-fg-muted">
+                                    Hourly budget used (last pass)
+                                </span>
+                                <span className="font-mono">
+                                    {discovery.last_run.requests ?? 0} /{" "}
+                                    {discovery.rate_limit_per_hour} req ·{" "}
+                                    <span className="text-fg-subtle">
+                                        {discovery.budget_percent}%
+                                    </span>
+                                </span>
+                            </div>
+                            <div className="h-2 rounded-full bg-border-muted overflow-hidden">
+                                <div
+                                    className={`h-full rounded-full transition-all ${
+                                        discovery.budget_percent > 90
+                                            ? "bg-danger"
+                                            : discovery.budget_percent > 70
+                                              ? "bg-attention"
+                                              : "bg-success"
+                                    }`}
+                                    style={{
+                                        width: `${Math.min(100, discovery.budget_percent)}%`,
+                                    }}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Last pass details */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+                            <MiniStat
+                                label="Finished"
+                                value={timeAgo(discovery.last_run.finished_at)}
+                            />
+                            <MiniStat
+                                label="Users walked"
+                                value={String(discovery.last_run.users_walked ?? 0)}
+                            />
+                            <MiniStat
+                                label="New users"
+                                value={String(discovery.last_run.new_users ?? 0)}
+                            />
+                            <MiniStat
+                                label="Duration"
+                                value={fmtDuration(discovery.last_run.duration_seconds)}
+                            />
+                        </div>
+
+                        {/* Pass history */}
+                        {discovery.history.length > 1 && (
+                            <details className="group/hist">
+                                <summary className="flex items-center justify-between text-[12px] text-fg-subtle hover:text-fg-muted cursor-pointer select-none py-1">
+                                    <span>Pass history ({discovery.history.length})</span>
+                                    <ChevronDown
+                                        size={14}
+                                        className="transition-transform group-open/hist:rotate-180"
+                                    />
+                                </summary>
+                                <div className="space-y-1 mt-1.5 max-h-[180px] overflow-y-auto pr-1">
+                                    {discovery.history.map((r) => (
+                                        <div
+                                            key={r.id}
+                                            className="flex items-center justify-between gap-2 text-[11px] text-fg-muted py-1 border-b border-border-muted/60 last:border-0"
+                                        >
+                                            <span>{timeAgo(r.finished_at)}</span>
+                                            <span className="font-mono">
+                                                {r.users_walked ?? 0} walked ·{" "}
+                                                {r.new_users ?? 0} new · {r.requests ?? 0} req
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </details>
+                        )}
+                    </>
+                )}
+            </div>
+
             {/* Quick commands hint */}
             <div className="card p-4">
                 <div className="flex items-center gap-2 mb-2">
@@ -492,6 +638,23 @@ export default function ManagementPage() {
             </div>
         </div>
     );
+}
+
+function MiniStat({label, value}: { label: string; value: string }) {
+    return (
+        <div className="rounded-md border border-border bg-canvas-subtle/50 px-2.5 py-2">
+            <div className="text-[11px] text-fg-subtle">{label}</div>
+            <div className="text-[13px] font-medium truncate">{value}</div>
+        </div>
+    );
+}
+
+function fmtDuration(seconds: number | null): string {
+    if (seconds == null) return "—";
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    const m = Math.floor(seconds / 60);
+    if (m < 60) return `${m}m ${Math.round(seconds % 60)}s`;
+    return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 function Row({label, value, mono}: { label: string; value: string; mono?: boolean }) {

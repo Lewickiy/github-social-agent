@@ -1553,6 +1553,68 @@ class Database:
             out.append(d)
         return out
 
+    # --------------------------------------------------
+    # Graph-discovery worker history (dashboard card)
+    # --------------------------------------------------
+
+    def record_discovery_run(self, stats):
+        """Persist one graph-discovery pass into ``discovery_runs``.
+
+        Called by the GraphDiscoveryWorker after every pass.  Returns the
+        new row id, or None when the table does not exist yet (migrations
+        not applied) — the worker must never break over this.
+        """
+        if not self._table_exists("discovery_runs"):
+            return None
+        cur = self.conn.execute(
+            """
+            INSERT INTO discovery_runs (
+                started_at, finished_at, users_walked, new_users,
+                requests, duration_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                stats.get("started_at"),
+                stats.get("finished_at"),
+                stats.get("users_walked"),
+                stats.get("new_users"),
+                stats.get("requests"),
+                stats.get("duration_seconds"),
+            ),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def discovery_runs(self, limit=20):
+        """Most recent graph-discovery passes (newest first) as dict rows.
+
+        Returns an empty list when the migration hasn't been applied.
+        """
+        if not self._table_exists("discovery_runs"):
+            return []
+        rows = self.conn.execute(
+            """
+            SELECT id, started_at, finished_at, users_walked, new_users,
+                   requests, duration_seconds
+            FROM discovery_runs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "started_at": r[1],
+                "finished_at": r[2],
+                "users_walked": r[3],
+                "new_users": r[4],
+                "requests": r[5],
+                "duration_seconds": r[6],
+            }
+            for r in rows
+        ]
+
     def developer_profile(self, username):
         """Build a full developer profile dict for display."""
         user_row = self.conn.execute(

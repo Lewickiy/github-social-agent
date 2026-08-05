@@ -255,3 +255,24 @@ export interface MLState {
   dataset: MLDataset;
   history: MLTrainingRun[];
 }
+
+/** One graph-discovery pass recorded by the background worker. */
+export interface DiscoveryRun {
+  id: number;
+  started_at: string | null;
+  finished_at: string | null;
+  users_walked: number | null;
+  new_users: number | null;
+  requests: number | null;
+  duration_seconds: number | null;
+}
+
+export interface DiscoveryState {
+  enabled: boolean;
+  rate_limit_per_hour: number;
+  pass_max_users: number;
+  last_run: DiscoveryRun | null;
+  /** Requests of the last pass as a % of the hourly budget. */
+  budget_percent: number;
+  history: DiscoveryRun[];
+}

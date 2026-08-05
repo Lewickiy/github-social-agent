@@ -1,18 +1,24 @@
 """GitHub Social Agent — CLI entry point.
 
-Usage:
+Usage (single working mode):
+    python main.py --silent            MAIN mode: collect + score + follow with
+                                       human-like delays.  Self-sustaining — waits
+                                       for the first followers / owner data, and
+                                       grows the follower graph via a calm
+                                       background worker (≤500 req/h).
+    python main.py --migrate           Apply pending database migrations
+    python main.py --migrate-status    Show migration status
+    python main.py --top               Show top 50 unscored users
+    python main.py --profile USER      Show developer profile for USER
+    python main.py --snapshot          Record today's profile snapshot now
+
+Force / backfill modes (usually not needed — --silent covers all of them):
     python main.py --collect-self      Collect owner's repos/languages/topics
-    python main.py --silent            Stealth collect repos + score with human-like delays
     python main.py --collect           Discover users & fetch repos (both phases)
     python main.py --collect-users     Phase 1: discover new users from follower graph
     python main.py --collect-users-rep Phase 2: fetch repos/languages for all users
     python main.py --score             Score / re-score users
     python main.py --follow            Follow top-scored users (respects daily limit)
-    python main.py --top               Show top 50 unscored users
-    python main.py --profile USER      Show developer profile for USER
-    python main.py --snapshot          Record today's profile snapshot now
-    python main.py --migrate           Apply pending database migrations
-    python main.py --migrate-status    Show migration status
 """
 
 import os
@@ -20,7 +26,7 @@ import signal
 import sys
 import threading
 
-from core.config import MY_USERNAME, SILENT_WORKERS
+from core.config import DISCOVERY_WORKER_ENABLED, MY_USERNAME, SILENT_WORKERS
 from core.database import Database
 from core.github_client import GithubClient
 from core.logger import get_logger
@@ -30,6 +36,7 @@ from services.scorer import Scorer
 from services.silent import SilentRunner
 from workers.company_worker import CompanyWorker
 from workers.followback_check_worker import FollowbackCheckWorker
+from workers.graph_discovery_worker import GraphDiscoveryWorker
 from workers.ml_trainer import MLTrainerWorker
 from workers.snapshot_worker import SnapshotWorker, take_snapshot_now
 
@@ -212,6 +219,15 @@ def main():
         snapshot_worker = SnapshotWorker(_shutdown)
         snapshot_worker.start()
 
+    # ── Graph growth for the main working mode ──
+    # A separate calm, rate-limited background worker walks the follower
+    # graph (≤ DISCOVERY_RATE_LIMIT_PER_HOUR requests/hour) and adds new
+    # users to the queue — silent itself only collects + scores + follows.
+    discovery_worker = None
+    if "--silent" in sys.argv and DISCOVERY_WORKER_ENABLED:
+        discovery_worker = GraphDiscoveryWorker(_shutdown)
+        discovery_worker.start()
+
     job_error = None
     try:
         if "--collect-self" in sys.argv:
@@ -267,19 +283,25 @@ def main():
         else:
             print(
                 """\
-Usage:
+Usage (single working mode):
+    python main.py --silent            MAIN mode: collect + score + follow with
+                                       human-like delays.  Self-sustaining — waits
+                                       for the first followers / owner data, and
+                                       grows the follower graph via a calm
+                                       background worker (≤500 req/h).
+    python main.py --migrate           Apply pending database migrations
+    python main.py --migrate-status    Show migration status
+    python main.py --top               Show top 50 unscored users
+    python main.py --profile USER      Show developer profile for USER
+    python main.py --snapshot          Record today's profile snapshot now
+
+Force / backfill modes (usually not needed — --silent covers all of them):
     python main.py --collect-self      Collect owner's repos/languages/topics
-    python main.py --silent            Stealth collect repos + score with human-like delays
     python main.py --collect           Discover users & fetch repos (both phases)
     python main.py --collect-users     Phase 1: discover new users from follower graph
     python main.py --collect-users-rep Phase 2: fetch repos/languages for all users
     python main.py --score             Score / re-score users
-    python main.py --follow            Follow top-scored users
-    python main.py --top               Show top 50 users
-    python main.py --profile USER      Show developer profile
-    python main.py --snapshot          Record today's profile snapshot now
-    python main.py --migrate           Apply pending migrations
-    python main.py --migrate-status    Show migration status\
+    python main.py --follow            Follow top-scored users (respects daily limit)\
 """
             )
     except Exception as exc:

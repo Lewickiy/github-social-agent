@@ -163,6 +163,54 @@ SILENT_PRIORITIZE_SMALL = False
 SILENT_REPO_CHECK_FRESHNESS_DAYS = 5
 
 # =====================================================
+# SILENT MODE — first-run gates & self-sustaining loop
+# =====================================================
+
+# A brand-new account can't do meaningful work: with zero followers the
+# queue is empty (nothing to process, no graph seeds), and an owner with
+# no collected repos makes the similarity half of the score dead (every
+# score caps at 35/100).  When True, silent mode prints a clear message
+# and WAITS — polling GitHub (owner followers / owner repos) every
+# SILENT_GATE_CHECK_INTERVAL_SECONDS — until the account is ready,
+# instead of silently finishing with "Processing 0 users".
+SILENT_GATES_ENABLED = True
+
+# How often (seconds) the gate-wait / idle-wait loops re-check GitHub
+# (owner followers, owner repos) and the DB.
+SILENT_GATE_CHECK_INTERVAL_SECONDS = 300
+
+# Minimum number of owner repos that must be collected before scoring is
+# allowed.  Below this, similarity scoring has nothing to compare against
+# and the runner waits for owner data instead of scoring blind.
+SILENT_MIN_OWNER_REPOS = 1
+
+# When True, silent mode is the SINGLE working mode: it never exits.
+# After draining its queue it waits for new work instead of stopping —
+# owner-follower scans run inside silent, while follower-graph growth is
+# handled by a separate calm background worker (see the DISCOVERY_* block
+# below).  When False, silent mode processes one batch and exits (legacy
+# one-shot behaviour).  Either way, --collect* / --score / --follow are
+# only needed as one-off force/backfill modes.
+SILENT_CONTINUOUS = True
+
+# =====================================================
+# GRAPH DISCOVERY WORKER — separate calm background thread
+# =====================================================
+
+# Grows the network by walking the follower graph at a conservative,
+# constant rate instead of in bursts.  Started automatically by --silent
+# (the only mode that needs growth); disable with DISCOVERY_WORKER_ENABLED.
+#
+# Hard request cap: each pass walks at most DISCOVERY_PASS_MAX_USERS users
+# (~1 profile request each, plus a followers request when their count
+# grew), paced to at most DISCOVERY_RATE_LIMIT_PER_HOUR requests/hour.  A
+# pass is sized to one hour's budget and runs once per hour, so the worker
+# stays calm and never blocks silent's processing.
+DISCOVERY_WORKER_ENABLED = True
+DISCOVERY_RATE_LIMIT_PER_HOUR = 500
+DISCOVERY_PASS_MAX_USERS = 500
+
+# =====================================================
 # ML — нейронная сеть для прогнозирования FOLLOWBACK
 # =====================================================
 
@@ -189,6 +237,22 @@ ML_EARLY_STOP_PATIENCE = 10        # stop after N epochs without val-loss improv
 # rollback.  Older versions (30+ at ~40 KB each) have no value — the
 # newest model trained on the most data is always the best.
 ML_KEEP_MODELS = 2
+
+# Random seed for fully reproducible training runs.  Without it every
+# retrain started from different random weights, a different train/val
+# split and a different batch order — so identical data produced
+# different models and val metrics bounced 0.54 → 0.77 between runs.
+# With the seed set, the same dataset always yields bit-identical
+# weights and metrics.  Recorded in each model's metadata.
+ML_SEED = 42
+
+# Minimum labeled dataset before training is allowed.  With a few
+# hundred samples the net has nothing to learn (CV AUC lands in the
+# 0.5–0.6 random-noise band) — so training stays skipped until both
+# classes are decently represented.
+ML_MIN_POSITIVE_SAMPLES = 100
+ML_MIN_NEGATIVE_SAMPLES = 100
+ML_MIN_TOTAL_SAMPLES = 250
 
 # ── Heavy / fork language-fetch gate ─────────────────────────────────────
 # When `READ_HEAVY_FORK_LANGUAGES` is False (default) the bot does NOT

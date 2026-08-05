@@ -8,7 +8,14 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 
-from core.config import CURRENT_SCORE_VERSION, GITHUB_API_RATE_LIMIT, ML_MODEL_DIR
+from core.config import (
+    CURRENT_SCORE_VERSION,
+    DISCOVERY_PASS_MAX_USERS,
+    DISCOVERY_RATE_LIMIT_PER_HOUR,
+    DISCOVERY_WORKER_ENABLED,
+    GITHUB_API_RATE_LIMIT,
+    ML_MODEL_DIR,
+)
 from core.tz import get_timezone, local_midnight_utc, parse_utc
 
 # The Followers growth chart always covers the same fixed window,
@@ -714,6 +721,37 @@ def _current_model_metadata():
             except (OSError, ValueError):
                 pass
     return None
+
+
+# ── Graph-discovery worker ──────────────────────────────────────────────
+
+def discovery_stats(db):
+    """Activity of the graph-discovery worker for the dashboard card.
+
+    * ``enabled`` / ``rate_limit_per_hour`` / ``pass_max_users`` — the
+      worker's configuration (from core.config).
+    * ``last_run`` — the most recent pass (started/finished at, users
+      walked, new users found, requests made, duration), or None when the
+      worker has never run (or the migration is not applied).
+    * ``budget_percent`` — the last pass's request count as a share of
+      the hourly budget (the worker runs one pass per hour window).
+    * ``history`` — the most recent passes, newest first.
+    """
+    runs = db.discovery_runs(limit=20)
+    last = runs[0] if runs else None
+    budget_percent = (
+        round(last["requests"] / DISCOVERY_RATE_LIMIT_PER_HOUR * 100, 1)
+        if last and DISCOVERY_RATE_LIMIT_PER_HOUR
+        else 0.0
+    )
+    return {
+        "enabled": DISCOVERY_WORKER_ENABLED,
+        "rate_limit_per_hour": DISCOVERY_RATE_LIMIT_PER_HOUR,
+        "pass_max_users": DISCOVERY_PASS_MAX_USERS,
+        "last_run": last,
+        "budget_percent": budget_percent,
+        "history": runs,
+    }
 
 
 def ml_state(db):

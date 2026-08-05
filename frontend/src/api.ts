@@ -1,5 +1,6 @@
 import type {
   Config,
+  DiscoveryState,
   JobsResponse,
   LanguageOption,
   MLState,
@@ -73,6 +74,7 @@ export const api = {
     get<UserProfile>(`/users/${encodeURIComponent(username)}`),
   languages: () => get<{ items: LanguageOption[] }>("/languages"),
   ml: () => get<MLState>("/ml"),
+  discovery: () => get<DiscoveryState>("/discovery"),
   config: () => get<Config>("/config"),
   settings: () => get<Settings>("/settings"),
   saveSettings: (timezone: string) => put<Settings>("/settings", { timezone }),

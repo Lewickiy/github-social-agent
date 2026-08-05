@@ -29,6 +29,16 @@ positives are weighted ×3 on an already 60 %-positive set).  The fixes:
   mean over the whole dataset — that is the number to trust when judging
   whether the model actually discriminates.  ``pred1_ratio`` (the "did we
   degenerate again" check) is reported for both.
+* **Reproducibility** — every random step (model init, batch shuffling,
+  dropout, train/val split) is seeded with ``ML_SEED`` (``torch.manual_seed``
+  at the top of each fit + a seeded generator in the split), so the *same*
+  dataset always produces the *same* model and the *same* metrics.  The
+  seed is stored in each model's metadata for provenance.
+* **Dataset gate** — training waits until both classes are decently
+  represented (``ML_MIN_POSITIVE_SAMPLES`` / ``ML_MIN_NEGATIVE_SAMPLES`` /
+  ``ML_MIN_TOTAL_SAMPLES`` in config).  On a couple of hundred samples the
+  net has nothing to learn and CV AUC just sits in the 0.5–0.6 noise band,
+  so the trainer skips those runs entirely.
 """
 
 import json
@@ -46,7 +56,11 @@ from core.config import (
     ML_EPOCHS,
     ML_HIDDEN_DIM,
     ML_KEEP_MODELS,
+    ML_MIN_NEGATIVE_SAMPLES,
+    ML_MIN_POSITIVE_SAMPLES,
+    ML_MIN_TOTAL_SAMPLES,
     ML_MODEL_DIR,
+    ML_SEED,
     ML_TOP_LANGUAGES,
     ML_TOP_TOPICS,
 )
@@ -64,10 +78,11 @@ WEIGHT_DECAY = 1e-4
 TRAIN_SPLIT = 0.8
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Minimum positive + negative examples required to train
-MIN_POSITIVE_SAMPLES = 5
-MIN_NEGATIVE_SAMPLES = 10
-MIN_TOTAL_SAMPLES = 30
+# Minimum positive + negative examples required to train.  Sourced from
+# config so the dataset-size gate is tunable without touching code.
+MIN_POSITIVE_SAMPLES = ML_MIN_POSITIVE_SAMPLES
+MIN_NEGATIVE_SAMPLES = ML_MIN_NEGATIVE_SAMPLES
+MIN_TOTAL_SAMPLES = ML_MIN_TOTAL_SAMPLES
 
 # Label scheme: 1 = user followed us back (any time), 0 = no followback
 # within 7+ days of our follow.  Kept in model metadata so each saved
@@ -78,9 +93,9 @@ LABEL_SCHEME = "followback_vs_no_followback_7d_plus"
 # A single 80/20 stratified split leaves only ~24 validation examples, and
 # a different random split of identical data moved val_acc 0.54 → 0.77
 # (v019 → v020).  The reported val_* metrics are therefore noise; the
-# cv_* means below are the honest estimate of model quality.
+# cv_* means below are the honest estimate of model quality.  Fold
+# assignment is seeded with the same ML_SEED as everything else.
 CV_FOLDS = 5
-CV_SEED = 42
 
 
 def train_and_save(db):
@@ -219,6 +234,7 @@ def train_and_save(db):
     meta_path = os.path.join(ML_MODEL_DIR, f"model_{version:03d}.json")
     metadata = {
         "version": version,
+        "seed": ML_SEED,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "label_scheme": LABEL_SCHEME,
         "num_samples": len(training_users),
@@ -292,7 +308,15 @@ def _fit_model(X_train, y_train, X_val, y_val, verbose=False):
     with the model already restored to its best validation state.
     *verbose* enables per-epoch progress logging (used for the main fit
     only — CV folds would spam the log).
+
+    Fully deterministic: the seed is reset at the top of every call, so
+    model init, batch shuffling and dropout all reproduce exactly — both
+    for the main fit and for each CV fold.
     """
+    torch.manual_seed(ML_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(ML_SEED)
+
     model = FollowbackPredictor(
         X_train.shape[1], hidden_dim=ML_HIDDEN_DIM, dropout=ML_DROPOUT,
     ).to(DEVICE)
@@ -378,8 +402,9 @@ def _kfold_metrics(X, y):
     the held-out fold with plain metrics.  Returns the mean metrics dict,
     or None when any fold would lack a class.
 
-    A fixed seed keeps the folds reproducible, so CV numbers are directly
-    comparable between retrains — unlike the random hold-out split.
+    Fold assignment is seeded with ``ML_SEED`` (same as the rest of
+    training), so CV numbers are directly comparable between retrains —
+    unlike the old random hold-out split.
     """
     n = len(y)
     pos_idx = (y == 1).nonzero(as_tuple=True)[0]
@@ -387,7 +412,7 @@ def _kfold_metrics(X, y):
     if len(pos_idx) < CV_FOLDS or len(neg_idx) < CV_FOLDS:
         return None
 
-    g = torch.Generator().manual_seed(CV_SEED)
+    g = torch.Generator().manual_seed(ML_SEED)
     pos_idx = pos_idx[torch.randperm(len(pos_idx), generator=g)]
     neg_idx = neg_idx[torch.randperm(len(neg_idx), generator=g)]
 
@@ -428,11 +453,17 @@ def _balanced_weights(labels):
 
 
 def _stratified_split(labels, train_frac):
-    """Return (train_idx, val_idx) with both classes in both splits."""
+    """Return (train_idx, val_idx) with both classes in both splits.
+
+    Seeded with ``ML_SEED`` so the same dataset always yields the same
+    split — otherwise val metrics are pure split-lottery (val_acc bounced
+    0.54 → 0.77 on identical data before the seed).
+    """
+    g = torch.Generator().manual_seed(ML_SEED)
     pos_idx = (labels == 1).nonzero(as_tuple=True)[0]
     neg_idx = (labels == 0).nonzero(as_tuple=True)[0]
-    pos_idx = pos_idx[torch.randperm(len(pos_idx))]
-    neg_idx = neg_idx[torch.randperm(len(neg_idx))]
+    pos_idx = pos_idx[torch.randperm(len(pos_idx), generator=g)]
+    neg_idx = neg_idx[torch.randperm(len(neg_idx), generator=g)]
     n_pos_tr = max(int(len(pos_idx) * train_frac), 1)
     n_neg_tr = max(int(len(neg_idx) * train_frac), 1)
     train_idx = torch.cat([pos_idx[:n_pos_tr], neg_idx[:n_neg_tr]])

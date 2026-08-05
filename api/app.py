@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfoNotFoundError
 from api.queries import (
     FOLLOWERS_HISTORY_DAYS,
     activity_timeline,
+    discovery_stats,
     followers_history,
     github_api_usage,
     language_options,
@@ -391,6 +392,16 @@ def ml_overview():
     db = _db()
     try:
         return ml_state(db)
+    finally:
+        db.conn.close()
+
+
+@app.get("/api/discovery")
+def discovery_overview():
+    """Graph-discovery worker: last pass, history, budget usage."""
+    db = _db()
+    try:
+        return discovery_stats(db)
     finally:
         db.conn.close()
 

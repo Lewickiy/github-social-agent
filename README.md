@@ -38,49 +38,65 @@ export GITHUB_TOKEN="ghp_..."
 # 3. Initialise the database
 python main.py --migrate
 
-# 4. Discover users through your follower graph
-python main.py --collect-users
-
-# 5. Collect repos, languages, and topics for all discovered users
-python main.py --collect-users-rep
-
-# 6. Score everyone (0–100 based on similarity to you)
-python main.py --score
-
-# 7. See the top matches
-python main.py --top
-
-# 8. Follow the best matches
-python main.py --follow
-```
-
-> **Note:** Your own profile (repos, languages, topics) is synced automatically
-> on every startup — you don't need to run `--collect-self` manually.  It is
-> still available as an explicit command if you want to force a refresh.
-
-Or use the **all-in-one silent mode** (steps 6 + 7 with stealth delays):
-
-```bash
+# 4. Run the bot (single working mode)
 python main.py --silent
 ```
+
+`--silent` is the **single working mode** — a self-sustaining daemon:
+
+* **First-run gates.** On a brand-new account it does not silently finish
+  with “Processing 0 users”.  Instead it prints a clear message and waits,
+  polling GitHub periodically: at least **one follower** must appear before
+  the network can start, and the owner needs at least
+  `SILENT_MIN_OWNER_REPOS` collected repo(s) before scoring makes sense
+  (otherwise every score would cap at 35/100).  As soon as the data
+  appears it resumes on its own.
+* **Self-growing.** After draining its queue it keeps running: it scans
+  for new owner followers itself, while a separate **calm background
+  worker** (see `DISCOVERY_*` settings) walks the follower graph at a
+  conservative, constant rate — at most `DISCOVERY_RATE_LIMIT_PER_HOUR`
+  (500) requests/hour — so the network grows steadily without any manual
+  steps and without bursts of API traffic.
+* **Everything in one run.** Repo/language/topic collection, scoring, and
+  following (respecting the daily limit) happen together, with stealth
+  delays.
+
+Your own profile (repos, languages, topics) is synced automatically on
+startup — no manual `--collect-self` step needed.
 
 ---
 
 ## Commands
 
+### Main mode
+
 | Command | Description |
 |---|---|
-| `--collect-self` | Collect your own repos, languages, and topics. Marks you as the **owner** — the baseline for all scoring. |
+| `--silent` | **Single working mode.** Collect repos + score + follow with human-like delays. Waits for first followers / owner data (gates), then grows the follower graph on its own and runs continuously. |
+
+### Force / backfill modes (usually not needed)
+
+The silent mode covers all of these; they exist only as one-off
+interventions (e.g. a one-time backfill on a large existing database).
+
+| Command | Description |
+|---|---|
 | `--collect-users` | Phase 1: traverse your follower graph and discover new users. |
 | `--collect-users-rep` | Phase 2: fetch repos, languages, and topics for every known user. |
 | `--collect` | Run both phases (discover + collect repos). |
-| `--silent` | Collect repos + score with human-like delays (stealth mode). |
+| `--collect-self` | Force-refresh your own repos/languages/topics. Marks you as the **owner** — the baseline for all scoring. |
 | `--score` | Score / re-score all users against your profile. |
 | `--follow` | Follow top-scored users (respects daily limit). |
-| `--top` | Print the top 50 unscored users. |
-| `--profile USER` | Show a detailed developer profile. |
+
+### Utility modes
+
+| Command | Description |
+|---|---|
 | `--migrate` | Apply pending database migrations. |
 | `--migrate-status` | Show which migrations have been applied. |
+| `--top` | Print the top 50 unscored users. |
+| `--profile USER` | Show a detailed developer profile. |
+| `--snapshot` | Record today's profile snapshot now. |
 
 ---
 
@@ -237,18 +253,14 @@ Press **Ctrl+C** twice → force exit immediately.
 # First run — initialise the database
 python main.py --migrate
 
-# Discover users from your follower network
-python main.py --collect-users
-
-# Stealth-collect repos + score (background-friendly)
+# Single working mode — a self-sustaining daemon:
+#   waits for first followers / owner data, collects, scores, follows,
+#   and grows the follower graph on its own.
 python main.py --silent
 
-# Check results
+# Check results while it runs (any time, other terminal)
 python main.py --top
 python main.py --profile some_user
-
-# Follow the best matches
-python main.py --follow
 ```
 
 > Your owner profile is synced from GitHub automatically on every command —
