@@ -1,0 +1,1463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GitHub Social Agent — Find developers who build like you</title>
+<meta name="description" content="GitHub Social Agent discovers developers with similar technologies, projects, and interests — helping you build a meaningful technical network.">
+<meta property="og:title" content="GitHub Social Agent">
+<meta property="og:description" content="A developer-discovery engine that analyses the GitHub graph and ranks developers by technical similarity to you.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2309090b'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%232ea043'/%3E%3Ccircle cx='8' cy='10' r='2.5' fill='%2358a6ff'/%3E%3Ccircle cx='25' cy='22' r='2.5' fill='%23a78bfa'/%3E%3Cpath d='M10.5 11.5 13.5 13.5M18.5 18.5l4 2' stroke='%23fff' stroke-width='1.4'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   GitHub Social Agent — single-file landing page
+   ============================================================ */
+:root{
+  --bg:#09090b;
+  --bg-soft:#0e0e11;
+  --card:#18181b;
+  --card-hover:#1d1d21;
+  --border:rgba(255,255,255,.08);
+  --border-strong:rgba(255,255,255,.14);
+  --text:#fafafa;
+  --text-2:#a1a1aa;
+  --text-3:#6b6b74;
+  --green:#2ea043;
+  --green-bright:#3fb950;
+  --green-dim:rgba(46,160,67,.14);
+  --blue:#58a6ff;
+  --purple:#a78bfa;
+  --amber:#d29922;
+  --red:#f85149;
+  --font-sans:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --radius:14px;
+  --container:1120px;
+  --header-h:64px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+body{
+  font-family:var(--font-sans);
+  background:var(--bg);
+  color:var(--text);
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+::selection{background:rgba(46,160,67,.35);color:#fff}
+img,svg,canvas{display:block;max-width:100%}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+code,kbd{font-family:var(--font-mono);font-size:.86em}
+:focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:4px}
+
+/* ---------- ambient background ---------- */
+.bg-glow{position:fixed;border-radius:50%;filter:blur(130px);pointer-events:none;z-index:0;opacity:.16}
+.g1{width:640px;height:640px;top:-260px;left:-180px;background:radial-gradient(circle,#2ea043,transparent 65%)}
+.g2{width:720px;height:720px;top:8%;right:-280px;background:radial-gradient(circle,#1f6feb,transparent 65%)}
+.grid-bg{
+  position:fixed;inset:0;z-index:0;pointer-events:none;
+  background-image:
+    radial-gradient(rgba(255,255,255,.045) 1px,transparent 1px),
+    linear-gradient(to bottom,rgba(255,255,255,.022) 1px,transparent 1px);
+  background-size:34px 34px,34px 34px;
+  -webkit-mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 30%,transparent 78%);
+          mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 30%,transparent 78%);
+}
+.container{position:relative;z-index:1;max-width:var(--container);margin:0 auto;padding:0 24px}
+main{position:relative;z-index:1}
+
+/* ---------- scroll progress ---------- */
+#progress{position:fixed;top:0;left:0;height:2px;width:0;z-index:90;
+  background:linear-gradient(90deg,var(--green),var(--blue),var(--purple));box-shadow:0 0 12px rgba(46,160,67,.6)}
+
+/* ---------- header ---------- */
+header{
+  position:fixed;top:0;left:0;right:0;z-index:80;height:var(--header-h);
+  display:flex;align-items:center;
+  background:rgba(9,9,11,.62);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid transparent;transition:border-color .25s,background .25s;
+}
+header.scrolled{background:rgba(9,9,11,.86);border-bottom-color:var(--border)}
+.nav{display:flex;align-items:center;gap:28px;height:var(--header-h)}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;letter-spacing:-.01em;white-space:nowrap}
+.logo-mark{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;background:linear-gradient(135deg,var(--green-dim),rgba(88,166,255,.12));border:1px solid rgba(46,160,67,.4)}
+.logo-mark svg{width:15px;height:15px}
+.logo em{font-style:normal;color:var(--green)}
+.nav-links{display:flex;align-items:center;gap:4px;margin-left:auto;list-style:none}
+.nav-links a{display:block;padding:8px 12px;font-size:13.5px;font-weight:500;color:var(--text-2);border-radius:8px;transition:color .2s,background .2s}
+.nav-links a:hover{color:var(--text);background:rgba(255,255,255,.05)}
+.nav-links a.active{color:var(--green-bright)}
+.nav-actions{display:flex;align-items:center;gap:12px}
+#burger{display:none;flex-direction:column;gap:5px;padding:8px}
+#burger span{width:20px;height:2px;background:var(--text);border-radius:2px;transition:transform .3s,opacity .3s}
+#burger.open span:nth-child(1){transform:translateY(7px) rotate(45deg)}
+#burger.open span:nth-child(2){opacity:0}
+#burger.open span:nth-child(3){transform:translateY(-7px) rotate(-45deg)}
+
+/* ---------- buttons ---------- */
+.btn{
+  display:inline-flex;align-items:center;gap:9px;
+  padding:11px 20px;border-radius:10px;font-weight:600;font-size:14px;
+  transition:transform .18s,box-shadow .18s,background .18s,border-color .18s,color .18s;
+  white-space:nowrap;
+}
+.btn svg{width:16px;height:16px;flex:none}
+.btn:active{transform:translateY(1px) scale(.99)}
+.btn-primary{background:var(--green);color:#04170a;box-shadow:0 0 0 1px rgba(46,160,67,.4),0 8px 24px -10px rgba(46,160,67,.55)}
+.btn-primary:hover{background:var(--green-bright);transform:translateY(-1px);box-shadow:0 0 0 1px rgba(46,160,67,.5),0 12px 30px -10px rgba(46,160,67,.7)}
+.btn-ghost{color:var(--text);border:1px solid var(--border-strong);background:rgba(255,255,255,.02)}
+.btn-ghost:hover{border-color:rgba(46,160,67,.5);background:var(--green-dim);color:#d1fadf;transform:translateY(-1px)}
+.btn-sm{padding:8px 14px;font-size:13px;border-radius:8px}
+
+/* ---------- sections ---------- */
+.section{padding:104px 0 24px}
+.section + .section{padding-top:104px}
+.sec-head{max-width:720px;margin-bottom:56px}
+.sec-head.center{margin-left:auto;margin-right:auto;text-align:center}
+.label{
+  display:inline-flex;align-items:center;gap:8px;
+  font-family:var(--font-mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--green-bright);margin-bottom:18px;
+}
+.label i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(46,160,67,.5);animation:pulse 2.4s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(46,160,67,.5)}70%{box-shadow:0 0 0 9px rgba(46,160,67,0)}100%{box-shadow:0 0 0 0 rgba(46,160,67,0)}}
+h1,h2,h3{letter-spacing:-.025em;line-height:1.12;font-weight:800}
+h2{font-size:clamp(28px,4.2vw,40px);margin-bottom:18px}
+h3{font-size:16.5px;font-weight:700}
+.lead{color:var(--text-2);font-size:clamp(16px,1.6vw,18px);line-height:1.65}
+.lead b{color:var(--text);font-weight:600}
+.grad{
+  background:linear-gradient(92deg,var(--green-bright) 0%,var(--blue) 55%,var(--purple) 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  transition:border-color .25s,transform .25s,box-shadow .25s;
+}
+.card:hover{border-color:rgba(46,160,67,.4);transform:translateY(-3px);box-shadow:0 18px 44px -22px rgba(46,160,67,.28)}
+.mono{font-family:var(--font-mono)}
+
+/* ---------- reveal animations ---------- */
+.reveal{opacity:0;transform:translateY(26px);transition:opacity .7s ease,transform .7s cubic-bezier(.22,1,.36,1)}
+.reveal.visible{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+  .reveal{opacity:1;transform:none}
+}
+
+/* ============================================================
+   HERO
+   ============================================================ */
+.hero{
+  padding-top:calc(var(--header-h) + 72px);
+  padding-bottom:96px;
+  display:grid;grid-template-columns:1.04fr .96fr;gap:56px;align-items:center;
+}
+.badge{
+  display:inline-flex;align-items:center;gap:9px;padding:7px 13px;border-radius:999px;
+  border:1px solid rgba(46,160,67,.35);background:var(--green-dim);color:#9ff0b9;
+  font-family:var(--font-mono);font-size:12px;margin-bottom:26px;
+}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--green-bright);animation:pulse 2s infinite}
+.hero h1{font-size:clamp(38px,6vw,62px);margin-bottom:22px;font-weight:800}
+.hero .sub{color:var(--text-2);font-size:clamp(16px,1.8vw,18.5px);max-width:540px;margin-bottom:34px;line-height:1.66}
+.hero-cta{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:44px}
+.hero-chips{display:flex;flex-wrap:wrap;gap:10px}
+.chip{
+  display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;
+  border:1px solid var(--border);background:rgba(255,255,255,.02);
+  font-family:var(--font-mono);font-size:11.5px;color:var(--text-2);
+}
+.chip i{width:6px;height:6px;border-radius:50%}
+.chip .c-green{background:var(--green)} .chip .c-blue{background:var(--blue)} .chip .c-purple{background:var(--purple)} .chip .c-gray{background:#52525b}
+.hero-visual{position:relative;border-radius:16px;overflow:hidden;min-height:360px;height:clamp(380px,42vw,480px)}
+.hero-visual::before{
+  content:'';position:absolute;inset:0;pointer-events:none;z-index:1;
+  background:radial-gradient(ellipse 60% 50% at 50% 45%,rgba(46,160,67,.10),transparent 70%);
+}
+.hero-visual canvas{position:absolute;inset:0;z-index:2}
+.graph-tip{
+  position:absolute;z-index:5;display:none;pointer-events:none;
+  background:#0c0c0f;border:1px solid rgba(46,160,67,.45);border-radius:8px;padding:7px 11px;
+  font-family:var(--font-mono);font-size:11px;box-shadow:0 10px 30px -8px rgba(0,0,0,.8);white-space:nowrap;
+}
+.graph-tip .tip-name{color:#e4e4e7;font-weight:600}
+.graph-tip .tip-sub{color:var(--green-bright)}
+.graph-tip.dev .tip-sub{color:var(--blue)}
+.graph-tip::before{content:'';position:absolute;left:0;top:12px;width:3px;height:calc(100% - 24px);border-radius:3px;background:var(--green)}
+
+/* ============================================================
+   PROBLEM
+   ============================================================ */
+.problem-flow{display:flex;flex-direction:column;align-items:stretch;max-width:520px;margin:0 auto}
+.problem-card{display:flex;gap:16px;align-items:flex-start;padding:22px 24px}
+.problem-card .ic{flex:none;width:42px;height:42px;border-radius:11px;display:grid;place-items:center;background:rgba(255,255,255,.04);border:1px solid var(--border)}
+.problem-card .ic svg{width:20px;height:20px;stroke:#a1a1aa}
+.problem-card h3{margin-bottom:4px}
+.problem-card p{font-size:14px;color:var(--text-2)}
+.problem-arrow{display:flex;justify-content:center;align-items:center;height:44px;color:var(--green);flex:none}
+.problem-arrow svg{width:18px;height:18px;animation:bounceDown 1.8s ease-in-out infinite}
+@keyframes bounceDown{0%,100%{transform:translateY(-3px)}50%{transform:translateY(3px)}}
+
+/* ============================================================
+   SOLUTION
+   ============================================================ */
+.sol-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.sol-card{padding:26px 22px;display:flex;flex-direction:column;gap:14px}
+.sol-card .ic{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;background:var(--green-dim);border:1px solid rgba(46,160,67,.35)}
+.sol-card .ic svg{width:19px;height:19px;stroke:var(--green-bright)}
+.sol-card p{font-size:13.5px;color:var(--text-2);flex:1}
+.sol-card .tag{font-family:var(--font-mono);font-size:10.5px;color:var(--text-3);letter-spacing:.06em;text-transform:uppercase}
+
+/* ============================================================
+   HOW IT WORKS
+   ============================================================ */
+.how-wrap{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;align-items:start}
+.how-step{position:relative;padding:20px 18px;height:100%}
+.how-step .num{
+  width:30px;height:30px;border-radius:9px;display:grid;place-items:center;margin-bottom:14px;
+  font-family:var(--font-mono);font-size:12.5px;font-weight:600;color:var(--green-bright);
+  background:var(--green-dim);border:1px solid rgba(46,160,67,.35);
+}
+.how-step h3{font-size:15px;margin-bottom:8px}
+.how-step p{font-size:12.5px;color:var(--text-2);margin-bottom:14px;flex:1}
+.how-step .tag{
+  display:inline-block;font-family:var(--font-mono);font-size:10.5px;color:var(--blue);
+  background:rgba(88,166,255,.09);border:1px solid rgba(88,166,255,.22);
+  padding:3px 8px;border-radius:6px;
+}
+.how-conn{position:relative;height:48px;display:flex;align-items:center;justify-content:center;color:var(--green)}
+.how-conn svg{width:16px;height:16px;animation:slideX 1.6s ease-in-out infinite}
+@keyframes slideX{0%,100%{transform:translateX(-3px)}50%{transform:translateX(3px)}}
+
+/* ============================================================
+   DEMO
+   ============================================================ */
+.demo-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.demo-col{display:flex;flex-direction:column;gap:16px}
+.demo-card{padding:26px;display:flex;flex-direction:column}
+.demo-card h3{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+.demo-card .who{font-family:var(--font-mono);font-size:11px;color:var(--text-3);margin-bottom:20px}
+.lang-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.lang-row .dot{width:9px;height:9px;border-radius:3px;flex:none}
+.lang-row .lname{width:92px;font-family:var(--font-mono);font-size:12px;color:var(--text-2);flex:none}
+.lang-row .track{flex:1;height:6px;border-radius:4px;background:rgba(255,255,255,.06);overflow:hidden}
+.lang-row .fill{height:100%;border-radius:4px;width:0;transition:width .7s cubic-bezier(.22,1,.36,1)}
+.lang-row .pct{width:44px;text-align:right;font-family:var(--font-mono);font-size:11.5px;color:var(--text-2);flex:none}
+.lang-row.other .lname{color:var(--text-3)}
+.lang-row.other .fill{background:#3f3f46}
+.topic-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:2px}
+.topic-chip{
+  padding:6px 13px;border-radius:999px;font-family:var(--font-mono);font-size:12px;
+  border:1px solid var(--border-strong);color:var(--text-2);background:rgba(255,255,255,.02);
+  transition:all .2s;user-select:none;
+}
+.topic-chip:hover{border-color:rgba(46,160,67,.5)}
+.topic-chip.active{background:var(--green-dim);border-color:rgba(46,160,67,.6);color:#9ff0b9}
+.topic-chip.active::before{content:'● ';color:var(--green-bright)}
+.range-row{margin-bottom:18px}
+.range-row .rhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}
+.range-row .rname{display:flex;align-items:center;gap:9px;font-family:var(--font-mono);font-size:12.5px;color:var(--text-2)}
+.range-row .rname .dot{width:9px;height:9px;border-radius:3px}
+.range-row output{font-family:var(--font-mono);font-size:12.5px;color:var(--green-bright);font-weight:600}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:5px;border-radius:999px;outline:none;
+  background:linear-gradient(to right,var(--rc,#2ea043) var(--p,50%),rgba(255,255,255,.08) var(--p,50%));
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;width:15px;height:15px;border-radius:50%;
+  background:var(--rc,#2ea043);border:2.5px solid #09090b;box-shadow:0 0 0 1px rgba(255,255,255,.25),0 2px 8px rgba(0,0,0,.6);
+  transition:transform .15s;cursor:grab;
+}
+input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.18)}
+input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:var(--rc,#2ea043);border:2.5px solid #09090b;cursor:grab}
+.demo-actions{display:flex;align-items:center;justify-content:space-between;margin-top:6px}
+.reset-link{font-family:var(--font-mono);font-size:11.5px;color:var(--text-3);padding:6px 10px;border-radius:7px;border:1px solid transparent;transition:all .2s}
+.reset-link:hover{color:var(--green-bright);border-color:rgba(46,160,67,.4)}
+.demo-result{grid-column:1/-1;padding:30px;display:grid;grid-template-columns:auto 1fr;gap:34px;align-items:center}
+.score-block{display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center}
+.ring{position:relative;width:138px;height:138px}
+.ring svg{width:100%;height:100%;transform:rotate(-90deg)}
+.ring circle{fill:none;stroke-width:9;stroke-linecap:round}
+.ring .ring-bg{stroke:rgba(255,255,255,.07)}
+.ring .ring-fg{stroke:url(#ringGrad);stroke-dasharray:326.7;stroke-dashoffset:326.7;transition:stroke-dashoffset .9s cubic-bezier(.22,1,.36,1)}
+.ring-text{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.ring-text .num{font-family:var(--font-mono);font-size:34px;font-weight:700;line-height:1}
+.ring-text .max{font-family:var(--font-mono);font-size:12px;color:var(--text-3);margin-top:5px}
+.score-cap{font-family:var(--font-mono);font-size:11.5px;color:var(--text-3);letter-spacing:.08em;text-transform:uppercase}
+.break-list{display:flex;flex-direction:column;gap:14px}
+.break-row .bhead{display:flex;justify-content:space-between;margin-bottom:7px}
+.break-row .bname{font-size:13px;font-weight:600;color:var(--text)}
+.break-row .bname small{display:block;font-family:var(--font-mono);font-weight:400;font-size:10.5px;color:var(--text-3);margin-top:1px}
+.break-row .bval{font-family:var(--font-mono);font-size:12.5px;color:var(--text-2)}
+.break-row .bval b{color:var(--text)}
+.break-row .track{height:7px;border-radius:5px;background:rgba(255,255,255,.06);overflow:hidden}
+.break-row .fill{height:100%;width:0;border-radius:5px;transition:width .7s cubic-bezier(.22,1,.36,1);position:relative}
+.break-row .fill.flash::after{content:'';position:absolute;inset:0;background:rgba(255,255,255,.35);border-radius:5px;animation:flashFade .7s ease}
+@keyframes flashFade{0%{opacity:.9}100%{opacity:0}}
+.impact{margin-top:22px;padding-top:18px;border-top:1px dashed var(--border);display:flex;flex-direction:column;gap:7px}
+.impact .i-title{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);margin-bottom:2px}
+.impact .i-row{display:flex;justify-content:space-between;gap:14px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-2)}
+.impact .i-row .pts{color:var(--green-bright);font-weight:600;white-space:nowrap}
+.impact .i-row .rel{color:var(--text-3)}
+.demo-note{grid-column:1/-1;margin-top:4px;font-size:12px;color:var(--text-3);text-align:center}
+.demo-note code{color:var(--text-2);background:rgba(255,255,255,.05);padding:1px 6px;border-radius:5px}
+
+/* ============================================================
+   SCORING
+   ============================================================ */
+.scoring-grid{display:grid;grid-template-columns:.9fr 1.1fr;gap:20px;align-items:stretch}
+.score-hero{padding:32px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;text-align:center}
+.stack-bar{width:100%;max-width:320px;height:12px;border-radius:7px;display:flex;overflow:hidden;background:rgba(255,255,255,.05)}
+.stack-bar .seg{transform:scaleX(0);transform-origin:left;transition:transform 1s cubic-bezier(.22,1,.36,1)}
+.stack-bar .seg:hover{filter:brightness(1.25)}
+.legend{display:grid;grid-template-columns:1fr 1fr;gap:8px 18px;width:100%;max-width:320px;margin-top:4px}
+.legend span{display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:11px;color:var(--text-2)}
+.legend i{width:8px;height:8px;border-radius:3px;flex:none}
+.factor-list{display:flex;flex-direction:column;gap:18px;padding:32px}
+.factor-row .fhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.factor-row .fname{font-size:14px;font-weight:600}
+.factor-row .fname small{display:block;font-family:var(--font-mono);font-weight:400;font-size:10.5px;color:var(--text-3);margin-top:2px}
+.factor-row .fpts{font-family:var(--font-mono);font-size:13px;color:var(--text-2)}
+.factor-row .fpts b{color:var(--text)}
+.factor-row .track{height:8px;border-radius:5px;background:rgba(255,255,255,.06);overflow:hidden}
+.factor-row .fill{height:100%;width:0;border-radius:5px;transition:width 1s cubic-bezier(.22,1,.36,1)}
+.scoring-foot{margin-top:26px;text-align:center;color:var(--text-2);font-size:15px;max-width:640px;margin-left:auto;margin-right:auto}
+
+/* ============================================================
+   ML
+   ============================================================ */
+.ml-wrap{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center}
+.ml-copy p{color:var(--text-2);font-size:15px;margin-bottom:16px;line-height:1.7}
+.ml-copy p b{color:var(--text)}
+.ml-copy .shadow-badge{
+  display:inline-flex;align-items:center;gap:8px;margin-top:4px;padding:8px 14px;border-radius:10px;
+  background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.35);
+  font-family:var(--font-mono);font-size:12px;color:#e8c26a;
+}
+.shadow-badge .dot{width:8px;height:8px;border-radius:50%;background:var(--amber);animation:pulse 1.8s infinite}
+.ml-pipe{display:flex;flex-direction:column;gap:0}
+.ml-step{display:flex;gap:16px;align-items:flex-start;padding:16px 18px}
+.ml-step .num{flex:none;width:30px;height:30px;border-radius:9px;display:grid;place-items:center;font-family:var(--font-mono);font-size:12px;font-weight:600;color:#e8c26a;background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.35)}
+.ml-step h3{font-size:14.5px;margin-bottom:3px}
+.ml-step p{font-size:12.5px;color:var(--text-2)}
+.ml-conn{height:26px;display:flex;justify-content:center;color:var(--amber)}
+.ml-conn svg{width:14px;height:14px;animation:bounceDown 1.8s ease-in-out infinite}
+
+/* ============================================================
+   FEATURES
+   ============================================================ */
+.feat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.feat-card{padding:26px 24px;display:flex;flex-direction:column;gap:14px}
+.feat-card .ic{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;background:rgba(88,166,255,.09);border:1px solid rgba(88,166,255,.25)}
+.feat-card .ic svg{width:19px;height:19px;stroke:var(--blue)}
+.feat-card p{font-size:13.5px;color:var(--text-2);flex:1}
+.feat-card .tag{font-family:var(--font-mono);font-size:10.5px;color:var(--text-3);letter-spacing:.05em}
+
+/* ============================================================
+   ARCHITECTURE
+   ============================================================ */
+.arch-scroll{overflow-x:auto;padding-bottom:8px;-webkit-overflow-scrolling:touch}
+.arch-scroll svg{min-width:640px;width:100%;height:auto}
+.arch-box{fill:var(--card);stroke:rgba(255,255,255,.14);stroke-width:1.2;rx:10}
+.arch-box.hot{stroke:rgba(46,160,67,.65)}
+.arch-box.ml{stroke:rgba(167,139,250,.6);stroke-dasharray:6 4}
+.arch-t{fill:#e4e4e7;font-family:var(--font-mono);font-size:11.5px;font-weight:600;text-anchor:middle}
+.arch-s{fill:#71717a;font-family:var(--font-mono);font-size:8.5px;text-anchor:middle}
+.flow{fill:none;stroke:rgba(46,160,67,.6);stroke-width:1.4;stroke-dasharray:6 8;animation:dash 1.3s linear infinite}
+.flow.blue{stroke:rgba(88,166,255,.5)}
+@keyframes dash{to{stroke-dashoffset:-28}}
+.arch-cap{font-family:var(--font-mono);font-size:11px;color:var(--text-3);text-align:center;margin-top:12px}
+.arch-cap code{color:var(--text-2)}
+
+/* ============================================================
+   CTA + FOOTER
+   ============================================================ */
+.cta{
+  position:relative;text-align:center;padding:120px 24px 130px;overflow:hidden;
+}
+.cta::before{
+  content:'';position:absolute;inset:auto -20% -60% -20%;height:80%;z-index:0;pointer-events:none;
+  background:radial-gradient(ellipse 55% 60% at 50% 100%,rgba(46,160,67,.22),transparent 70%);
+}
+.cta h2{font-size:clamp(32px,5vw,52px);margin-bottom:18px}
+.cta p{color:var(--text-2);font-size:clamp(15px,1.7vw,17.5px);max-width:560px;margin:0 auto 36px}
+.cta .btn{position:relative;z-index:1;padding:15px 30px;font-size:15.5px}
+.cta-code{
+  position:relative;z-index:1;margin-top:34px;display:inline-block;
+  font-family:var(--font-mono);font-size:12.5px;color:var(--text-2);
+  background:var(--card);border:1px solid var(--border);border-radius:10px;padding:11px 18px;
+}
+.cta-code .d{color:var(--text-3)} .cta-code .c{color:var(--green-bright)}
+footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;z-index:1}
+.footer-grid{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:40px;margin-bottom:40px}
+.footer-brand p{color:var(--text-3);font-size:13.5px;margin-top:12px;max-width:340px;line-height:1.65}
+.footer-col h4{font-family:var(--font-mono);font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--text-3);margin-bottom:16px}
+.footer-col ul{list-style:none;display:flex;flex-direction:column;gap:10px}
+.footer-col a{color:var(--text-2);font-size:13.5px;transition:color .2s}
+.footer-col a:hover{color:var(--green-bright)}
+.footer-col .mono-item{font-family:var(--font-mono);font-size:12px;color:var(--text-2)}
+.footer-bottom{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:26px;font-size:12px;color:var(--text-3)}
+.footer-bottom a{color:var(--text-2)}
+.footer-bottom a:hover{color:var(--green-bright)}
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+@media (max-width:1024px){
+  .sol-grid{grid-template-columns:repeat(2,1fr)}
+  .feat-grid{grid-template-columns:repeat(2,1fr)}
+  .how-wrap{grid-template-columns:repeat(3,1fr)}
+  .ml-wrap{grid-template-columns:1fr;gap:36px}
+  .hero{grid-template-columns:1fr;gap:44px;padding-top:calc(var(--header-h) + 48px)}
+  .hero-visual{height:400px;max-width:640px}
+}
+@media (max-width:860px){
+  .section{padding:84px 0 16px}
+  .section + .section{padding-top:84px}
+  .demo-grid{grid-template-columns:1fr}
+  .demo-result{grid-column:auto;grid-template-columns:1fr;justify-items:center;gap:26px;text-align:left}
+  .demo-result .break-list,.demo-result .impact{width:100%;max-width:520px}
+  .score-block{flex-direction:row;gap:18px}
+  .scoring-grid{grid-template-columns:1fr}
+  #burger{display:flex}
+  .nav-links{
+    position:absolute;top:var(--header-h);left:0;right:0;margin:0;
+    flex-direction:column;align-items:stretch;gap:2px;padding:14px 16px 18px;
+    background:rgba(9,9,11,.97);border-bottom:1px solid var(--border);
+    display:none;
+  }
+  .nav-links.open{display:flex}
+  .nav-links a{padding:12px 14px;font-size:15px}
+}
+@media (max-width:640px){
+  .container{padding:0 18px}
+  .hero{padding-top:calc(var(--header-h) + 40px);padding-bottom:72px}
+  .hero-visual{height:340px;min-height:300px}
+  .sol-grid,.feat-grid{grid-template-columns:1fr}
+  .how-wrap{grid-template-columns:1fr}
+  .how-conn{height:34px;transform:rotate(90deg)}
+  .score-block{flex-direction:column}
+  .legend{grid-template-columns:1fr 1fr}
+  .footer-grid{grid-template-columns:1fr;gap:30px}
+  .nav-actions .btn-sm{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="bg-glow g1" aria-hidden="true"></div>
+<div class="bg-glow g2" aria-hidden="true"></div>
+<div class="grid-bg" aria-hidden="true"></div>
+<div id="progress" aria-hidden="true"></div>
+
+<!-- ================= HEADER ================= -->
+<header id="header">
+  <nav class="nav container" aria-label="Main navigation">
+    <a class="logo" href="#top" aria-label="GitHub Social Agent — home">
+      <span class="logo-mark">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="3.4" fill="#2ea043"/><circle cx="4.5" cy="6" r="2" fill="#58a6ff"/><circle cx="19" cy="18" r="2" fill="#a78bfa"/><path d="M6.3 7.2 9.8 10M14.5 13.5l2.4 2.4" stroke="#fafafa" stroke-width="1.3"/></svg>
+      </span>
+      GitHub <em>Social</em> Agent
+    </a>
+    <ul class="nav-links" id="navLinks">
+      <li><a href="#how">How it works</a></li>
+      <li><a href="#demo">Demo</a></li>
+      <li><a href="#scoring">Scoring</a></li>
+      <li><a href="#ml">ML</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+    </ul>
+    <div class="nav-actions">
+      <a class="btn btn-primary btn-sm" href="https://github.com/Lewickiy/github-follow-master" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        View on GitHub
+      </a>
+      <button id="burger" aria-label="Toggle menu" aria-expanded="false"><span></span><span></span><span></span></button>
+    </div>
+  </nav>
+</header>
+
+<main id="top">
+
+<!-- ================= HERO ================= -->
+<section class="hero container" aria-label="Intro">
+  <div class="hero-copy">
+    <span class="badge reveal"><span class="dot"></span> Developer discovery engine · v0.1</span>
+    <h1 class="reveal" data-delay="60">Find developers who <span class="grad">build like you</span></h1>
+    <p class="sub reveal" data-delay="120">GitHub Social Agent discovers developers with similar technologies, projects, and interests — helping you build a meaningful technical network.</p>
+    <div class="hero-cta reveal" data-delay="180">
+      <a class="btn btn-primary" href="https://github.com/Lewickiy/github-follow-master" target="_blank" rel="noopener">
+        View on GitHub
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8"/></svg>
+      </a>
+      <a class="btn btn-ghost" href="#how">How it works</a>
+    </div>
+    <div class="hero-chips reveal" data-delay="240">
+      <span class="chip"><i class="c-green"></i>0–100 similarity score</span>
+      <span class="chip"><i class="c-purple"></i>shadow-mode ML</span>
+      <span class="chip"><i class="c-blue"></i>local-first SQLite</span>
+      <span class="chip"><i class="c-gray"></i>self-growing graph</span>
+    </div>
+  </div>
+  <div class="hero-visual card reveal" data-delay="150" id="heroCanvasWrap" aria-label="Animated graph: from your GitHub profile to relevant connections">
+    <canvas id="heroCanvas" role="img" aria-label="Animated pipeline from your GitHub profile through a technology fingerprint and discovery graph to relevant connections"></canvas>
+    <div class="graph-tip" id="graphTip"></div>
+  </div>
+</section>
+
+<!-- ================= PROBLEM ================= -->
+<section class="section" id="problem" aria-label="The problem">
+  <div class="container">
+    <div class="sec-head reveal">
+      <span class="label"><i></i>The problem</span>
+      <h2>GitHub has millions of developers.<br>Finding the right ones is <span class="grad">hard.</span></h2>
+      <p class="lead">Popular developers are not always relevant developers. The most valuable connections are people who share your technologies, engineering interests, and project mindset.</p>
+    </div>
+    <div class="problem-flow">
+      <div class="problem-card card reveal">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+        <div><h3>Millions of developers</h3><p>Every profile, repository, and follower edge is a candidate — and almost all of it is noise for you.</p></div>
+      </div>
+      <div class="problem-arrow" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>
+      <div class="problem-card card reveal" data-delay="80">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></div>
+        <div><h3>Hard to find relevant people</h3><p>Searching by keywords or popularity rarely surfaces engineers who actually work on the same problems as you.</p></div>
+      </div>
+      <div class="problem-arrow" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>
+      <div class="problem-card card reveal" data-delay="160">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
+        <div><h3>Manual discovery does not scale</h3><p>Reading hundreds of profiles by hand takes hours — and the results are never comparable.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= SOLUTION ================= -->
+<section class="section" id="solution" aria-label="The solution">
+  <div class="container">
+    <div class="sec-head center reveal">
+      <span class="label"><i></i>The solution</span>
+      <h2>Your personal GitHub <span class="grad">discovery agent</span></h2>
+      <p class="lead">The agent continuously analyses the GitHub ecosystem around your profile and ranks developers by technical similarity.</p>
+    </div>
+    <div class="sol-grid">
+      <div class="sol-card card reveal">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M8 11h6M11 8v6"/></svg></div>
+        <h3>Discover</h3>
+        <p>Traverses follower networks and discovers new developers.</p>
+        <span class="tag">follower graph</span>
+      </div>
+      <div class="sol-card card reveal" data-delay="80">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></div>
+        <h3>Analyse</h3>
+        <p>Collects repositories, languages, topics, and activity data.</p>
+        <span class="tag">repo intelligence</span>
+      </div>
+      <div class="sol-card card reveal" data-delay="160">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10M18 20V4M6 20v-4"/></svg></div>
+        <h3>Score</h3>
+        <p>Ranks developers using your own GitHub profile as a baseline.</p>
+        <span class="tag">0–100 ranking</span>
+      </div>
+      <div class="sol-card card reveal" data-delay="240">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></div>
+        <h3>Connect</h3>
+        <p>Can automatically follow relevant developers within configured limits.</p>
+        <span class="tag">automated networking</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= HOW IT WORKS ================= -->
+<section class="section" id="how" aria-label="How it works">
+  <div class="container">
+    <div class="sec-head center reveal">
+      <span class="label"><i></i>How it works</span>
+      <h2>From GitHub data to <span class="grad">developer connections</span></h2>
+    </div>
+    <div class="how-wrap">
+      <div class="how-step card reveal">
+        <div class="num">01</div>
+        <h3>GitHub API</h3>
+        <p>Collector and discovery workers read profile, repository, and follower data within rate limits.</p>
+        <span class="tag">api.github.com</span>
+      </div>
+      <div class="how-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+      <div class="how-step card reveal" data-delay="80">
+        <div class="num">02</div>
+        <h3>Repository Collection</h3>
+        <p>Languages, topics, and activity recency are stored for every developer.</p>
+        <span class="tag">languages · topics</span>
+      </div>
+      <div class="how-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+      <div class="how-step card reveal" data-delay="160">
+        <div class="num">03</div>
+        <h3>Developer Profile</h3>
+        <p>Every discovered user becomes a node in a local similarity graph.</p>
+        <span class="tag">SQLite · local-first</span>
+      </div>
+      <div class="how-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+      <div class="how-step card reveal" data-delay="240">
+        <div class="num">04</div>
+        <h3>Similarity Scoring</h3>
+        <p>Profiles are compared against your baseline using histogram intersection and Jaccard similarity.</p>
+        <span class="tag">score 0–100</span>
+      </div>
+      <div class="how-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+      <div class="how-step card reveal" data-delay="320">
+        <div class="num">05</div>
+        <h3>Ranked Developers</h3>
+        <p>Top matches are surfaced — and can be followed within configured daily limits.</p>
+        <span class="tag">DAILY_FOLLOW_LIMIT</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= INTERACTIVE DEMO ================= -->
+<section class="section" id="demo" aria-label="Interactive similarity demo">
+  <div class="container">
+    <div class="sec-head center reveal">
+      <span class="label"><i></i>Interactive demo</span>
+      <h2>See how <span class="grad">developer similarity</span> works</h2>
+      <p class="lead">Your profile is compared with a developer candidate. Adjust the candidate's stack and watch the similarity score react in real time.</p>
+    </div>
+
+    <div class="demo-grid">
+      <!-- your profile (static) -->
+      <div class="demo-card card reveal">
+        <h3>Your profile</h3>
+        <div class="who">owner baseline · auto-synced</div>
+        <div class="lang-row"><span class="dot" style="background:#b07219"></span><span class="lname">Java</span><span class="track"><span class="fill" style="background:#b07219;width:45%"></span></span><span class="pct">45%</span></div>
+        <div class="lang-row"><span class="dot" style="background:#3572A5"></span><span class="lname">Python</span><span class="track"><span class="fill" style="background:#3572A5;width:25%"></span></span><span class="pct">25%</span></div>
+        <div class="lang-row"><span class="dot" style="background:#f1e05a"></span><span class="lname">JavaScript</span><span class="track"><span class="fill" style="background:#f1e05a;width:15%"></span></span><span class="pct">15%</span></div>
+        <div class="lang-row other"><span class="dot"></span><span class="lname">Other</span><span class="track"><span class="fill" style="width:15%"></span></span><span class="pct">15%</span></div>
+        <div class="topic-list" style="margin-top:14px">
+          <span class="topic-chip active" style="cursor:default">backend</span>
+          <span class="topic-chip active" style="cursor:default">spring</span>
+          <span class="topic-chip active" style="cursor:default">docker</span>
+          <span class="topic-chip active" style="cursor:default">kubernetes</span>
+        </div>
+      </div>
+
+      <!-- candidate (editable) -->
+      <div class="demo-card card reveal" data-delay="80">
+        <h3>Developer candidate</h3>
+        <div class="who">adjust languages and topics</div>
+        <div class="range-row">
+          <div class="rhead"><span class="rname"><span class="dot" style="background:#b07219"></span>Java</span><output id="valJava">50%</output></div>
+          <input type="range" id="sliderJava" min="0" max="100" step="5" value="50" style="--rc:#b07219" aria-label="Candidate Java share">
+        </div>
+        <div class="range-row">
+          <div class="rhead"><span class="rname"><span class="dot" style="background:#3572A5"></span>Python</span><output id="valPython">20%</output></div>
+          <input type="range" id="sliderPython" min="0" max="100" step="5" value="20" style="--rc:#3572A5" aria-label="Candidate Python share">
+        </div>
+        <div class="range-row">
+          <div class="rhead"><span class="rname"><span class="dot" style="background:#00ADD8"></span>Go</span><output id="valGo">10%</output></div>
+          <input type="range" id="sliderGo" min="0" max="100" step="5" value="10" style="--rc:#00ADD8" aria-label="Candidate Go share">
+        </div>
+        <div class="lang-row other" style="margin-bottom:18px">
+          <span class="dot"></span><span class="lname">Other</span>
+          <span class="track"><span class="fill" id="barOther" style="width:20%"></span></span>
+          <span class="pct" id="valOther">20%</span>
+        </div>
+        <div class="demo-actions" style="margin-bottom:10px">
+          <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-3);letter-spacing:.1em;text-transform:uppercase">Topics</span>
+          <button class="reset-link" id="resetDemo" type="button">↺ reset</button>
+        </div>
+        <div class="topic-list" id="candTopics">
+          <button class="topic-chip active" data-topic="backend" type="button">backend</button>
+          <button class="topic-chip active" data-topic="spring" type="button">spring</button>
+          <button class="topic-chip active" data-topic="docker" type="button">docker</button>
+          <button class="topic-chip active" data-topic="cloud" type="button">cloud</button>
+        </div>
+      </div>
+
+      <!-- result -->
+      <div class="demo-result card reveal" id="demoResult">
+        <div class="score-block">
+          <div class="ring" id="demoRing">
+            <svg viewBox="0 0 120 120" aria-hidden="true">
+              <defs>
+                <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#2ea043"/>
+                  <stop offset="100%" stop-color="#58a6ff"/>
+                </linearGradient>
+              </defs>
+              <circle class="ring-bg" cx="60" cy="60" r="52"/>
+              <circle class="ring-fg" cx="60" cy="60" r="52"/>
+            </svg>
+            <div class="ring-text"><span class="num" id="scoreNum" data-v="0">0</span><span class="max">/ 100</span></div>
+          </div>
+          <div>
+            <div class="score-cap">Similarity score</div>
+            <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-3);margin-top:6px;max-width:150px;text-align:center">higher = closer to your stack</div>
+          </div>
+        </div>
+        <div>
+          <div class="break-list">
+            <div class="break-row">
+              <div class="bhead"><span class="bname">Language similarity<small>histogram overlap of shared stacks</small></span><span class="bval"><b id="vLang">0</b> / 30</span></div>
+              <div class="track"><div class="fill" id="fLang" style="background:linear-gradient(90deg,#b07219,#3572A5)"></div></div>
+            </div>
+            <div class="break-row">
+              <div class="bhead"><span class="bname">Topic similarity<small>shared topics · related topics half-credit</small></span><span class="bval"><b id="vTopic">0</b> / 20</span></div>
+              <div class="track"><div class="fill" id="fTopic" style="background:linear-gradient(90deg,#58a6ff,#a78bfa)"></div></div>
+            </div>
+            <div class="break-row">
+              <div class="bhead"><span class="bname">Repository activity<small>simulated recency signal</small></span><span class="bval"><b id="vAct">0</b> / 15</span></div>
+              <div class="track"><div class="fill" id="fAct" style="background:var(--purple)"></div></div>
+            </div>
+            <div class="break-row">
+              <div class="bhead"><span class="bname">Profile quality<small>bio · repo count · followers</small></span><span class="bval"><b id="vQual">0</b> / 35</span></div>
+              <div class="track"><div class="fill" id="fQual" style="background:#71717a"></div></div>
+            </div>
+          </div>
+          <div class="impact">
+            <div class="i-title">What drives the score</div>
+            <div id="impactList"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="demo-note reveal">This is a demo of the scoring principle — not a real analysis of your GitHub profile. The live system uses <code>histogram intersection</code> (languages), <code>Jaccard similarity</code> (topics) and <code>repo recency</code> (activity).</p>
+  </div>
+</section>
+
+<!-- ================= SCORING ================= -->
+<section class="section" id="scoring" aria-label="Scoring">
+  <div class="container">
+    <div class="sec-head center reveal">
+      <span class="label"><i></i>Scoring</span>
+      <h2>Recommendations based on <span class="grad">engineering signals</span></h2>
+      <p class="lead">The score uses measurable technical signals instead of popularity alone.</p>
+    </div>
+    <div class="scoring-grid">
+      <div class="score-hero card reveal">
+        <div class="ring" id="scRing" style="width:170px;height:170px">
+          <svg viewBox="0 0 120 120" aria-hidden="true">
+            <circle class="ring-bg" cx="60" cy="60" r="52"/>
+            <circle class="ring-fg" cx="60" cy="60" r="52"/>
+          </svg>
+          <div class="ring-text"><span class="num" id="scScoreNum" data-v="0" style="font-size:42px">0</span><span class="max">/ 100</span></div>
+        </div>
+        <div class="score-cap">Developer Score</div>
+        <div class="stack-bar" aria-label="Score composition">
+          <div class="seg" style="width:30%;background:var(--green)" data-w="30"></div>
+          <div class="seg" style="width:20%;background:var(--blue)" data-w="20"></div>
+          <div class="seg" style="width:15%;background:var(--purple)" data-w="15"></div>
+          <div class="seg" style="width:35%;background:#52525b" data-w="35"></div>
+        </div>
+        <div class="legend">
+          <span><i style="background:var(--green)"></i>Languages 30</span>
+          <span><i style="background:var(--blue)"></i>Topics 20</span>
+          <span><i style="background:var(--purple)"></i>Activity 15</span>
+          <span><i style="background:#52525b"></i>Quality 35</span>
+        </div>
+      </div>
+      <div class="factor-list card reveal" data-delay="80">
+        <div class="factor-row">
+          <div class="fhead"><span class="fname">Profile quality<small>bio · repo count · followers</small></span><span class="fpts"><b>35</b> pts</span></div>
+          <div class="track"><div class="fill" data-w="100%" style="background:linear-gradient(90deg,#3f3f46,#71717a)"></div></div>
+        </div>
+        <div class="factor-row">
+          <div class="fhead"><span class="fname">Languages<small>histogram intersection with your stack</small></span><span class="fpts"><b>30</b> pts</span></div>
+          <div class="track"><div class="fill" data-w="86%" style="background:linear-gradient(90deg,#2ea043,#3fb950)"></div></div>
+        </div>
+        <div class="factor-row">
+          <div class="fhead"><span class="fname">Topics<small>Jaccard similarity of topic sets</small></span><span class="fpts"><b>20</b> pts</span></div>
+          <div class="track"><div class="fill" data-w="57%" style="background:linear-gradient(90deg,#1f6feb,#58a6ff)"></div></div>
+        </div>
+        <div class="factor-row">
+          <div class="fhead"><span class="fname">Activity<small>days since last repository update</small></span><span class="fpts"><b>15</b> pts</span></div>
+          <div class="track"><div class="fill" data-w="43%" style="background:linear-gradient(90deg,#7c3aed,#a78bfa)"></div></div>
+        </div>
+      </div>
+    </div>
+    <p class="scoring-foot reveal">The system compares programming languages, repository topics, and activity patterns between developers — not follower counts or popularity.</p>
+  </div>
+</section>
+
+<!-- ================= MACHINE LEARNING ================= -->
+<section class="section" id="ml" aria-label="Machine learning">
+  <div class="container">
+    <div class="sec-head reveal">
+      <span class="label"><i></i>Machine learning</span>
+      <h2>Experimental <span class="grad">machine learning</span> layer</h2>
+    </div>
+    <div class="ml-wrap">
+      <div class="ml-copy">
+        <p>The project includes an ML model that learns from <b>historical follow decisions</b> and evaluates prediction quality on real GitHub data.</p>
+        <p>The model currently runs in <b>shadow mode</b> — its predictions are logged and evaluated, but never used to make decisions.</p>
+        <span class="shadow-badge"><span class="dot"></span>SHADOW MODE · predictions logged, not applied</span>
+        <p style="margin-top:18px;font-size:13.5px;color:var(--text-3)">Production decisions are still controlled by the deterministic scoring system.</p>
+      </div>
+      <div class="ml-pipe">
+        <div class="ml-step card"><div class="num">1</div><div><h3>Historical Data</h3><p>Past follow decisions and profile signals become training examples.</p></div></div>
+        <div class="ml-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>
+        <div class="ml-step card"><div class="num">2</div><div><h3>ML Training</h3><p>A PyTorch model learns which signals predict a good connection.</p></div></div>
+        <div class="ml-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>
+        <div class="ml-step card"><div class="num">3</div><div><h3>Prediction Evaluation</h3><p>Precision and recall are measured against real GitHub outcomes.</p></div></div>
+        <div class="ml-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>
+        <div class="ml-step card"><div class="num">4</div><div><h3>Quality Analysis</h3><p>Metrics decide whether the model is ever promoted out of shadow mode.</p></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ENGINEERING FEATURES ================= -->
+<section class="section" id="features" aria-label="Engineering features">
+  <div class="container">
+    <div class="sec-head center reveal">
+      <span class="label"><i></i>Engineering</span>
+      <h2>Built for <span class="grad">long-running operation</span></h2>
+      <p class="lead">A background service designed to run for weeks without supervision.</p>
+    </div>
+    <div class="feat-grid">
+      <div class="feat-card card reveal">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M19.1 4.9l-2.8 2.8M7.7 16.3l-2.8 2.8"/></svg></div>
+        <h3>Self-growing discovery</h3>
+        <p>Continuously discovers new developers through follower networks.</p>
+        <span class="tag">DISCOVERY_RATE_LIMIT_PER_HOUR</span>
+      </div>
+      <div class="feat-card card reveal" data-delay="60">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10M12 6V4M4 20V14M20 20V8M4 20h16"/><path d="M12 10l-2-2M12 6l2-2M4 14l-2 2"/></svg></div>
+        <h3>Rate-limit aware</h3>
+        <p>Designed around GitHub API constraints with retries and cooldowns.</p>
+        <span class="tag">401/403 retry · 2h cooldown</span>
+      </div>
+      <div class="feat-card card reveal" data-delay="120">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></div>
+        <h3>Local-first</h3>
+        <p>Stores collected data in your own SQLite database.</p>
+        <span class="tag">data/github_social.db</span>
+      </div>
+      <div class="feat-card card reveal" data-delay="180">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/></svg></div>
+        <h3>Docker ready</h3>
+        <p>Runs as a standalone background service.</p>
+        <span class="tag">Dockerfile · compose</span>
+      </div>
+      <div class="feat-card card reveal" data-delay="240">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15v-3M12 15V9M17 15v-6"/></svg></div>
+        <h3>Dashboard</h3>
+        <p>Provides a web interface for exploring collected data.</p>
+        <span class="tag">FastAPI · React</span>
+      </div>
+      <div class="feat-card card reveal" data-delay="300">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><path d="M12 2v10"/></svg></div>
+        <h3>Graceful operation</h3>
+        <p>Supports safe shutdown and persistent progress.</p>
+        <span class="tag">SIGINT · SIGTERM</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ARCHITECTURE ================= -->
+<section class="section" id="architecture" aria-label="Architecture">
+  <div class="container">
+    <div class="sec-head center reveal">
+      <span class="label"><i></i>Architecture</span>
+      <h2>How the system is <span class="grad">wired together</span></h2>
+      <p class="lead">Workers collect data, the scoring engine ranks it, and the ML model watches from shadow mode.</p>
+    </div>
+    <div class="arch-scroll reveal">
+      <svg viewBox="0 0 760 580" role="img" aria-label="Architecture diagram">
+        <defs>
+          <marker id="arrG" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0 0 L6 3 L0 6 Z" fill="rgba(46,160,67,.65)"/>
+          </marker>
+          <marker id="arrB" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0 0 L6 3 L0 6 Z" fill="rgba(88,166,255,.55)"/>
+          </marker>
+        </defs>
+
+        <rect class="arch-box" x="300" y="18" width="160" height="48" rx="10"/>
+        <text class="arch-t" x="380" y="37">GitHub API</text>
+        <text class="arch-s" x="380" y="54">REST · rate-limited</text>
+
+        <path class="flow" d="M380 66 V116" marker-end="url(#arrG)"/>
+
+        <rect class="arch-box hot" x="280" y="116" width="200" height="52" rx="10"/>
+        <text class="arch-t" x="380" y="137">Discovery Engine</text>
+        <text class="arch-s" x="380" y="154">traverses follower graph</text>
+
+        <path class="flow" d="M380 168 V192 M380 192 H230 M230 192 V226" marker-end="url(#arrG)"/>
+        <path class="flow blue" d="M380 192 H530 M530 192 V226" marker-end="url(#arrB)"/>
+
+        <rect class="arch-box" x="140" y="226" width="180" height="52" rx="10"/>
+        <text class="arch-t" x="230" y="247">Repository Collector</text>
+        <text class="arch-s" x="230" y="264">repos · languages · topics</text>
+
+        <rect class="arch-box" x="440" y="226" width="180" height="52" rx="10"/>
+        <text class="arch-t" x="530" y="247">Graph Discovery</text>
+        <text class="arch-s" x="530" y="264">follower network growth</text>
+
+        <path class="flow" d="M230 278 V302 M230 302 H380 M380 302 V336" marker-end="url(#arrG)"/>
+        <path class="flow blue" d="M530 278 V302 M530 302 H380"/>
+
+        <rect class="arch-box hot" x="280" y="336" width="200" height="52" rx="10"/>
+        <text class="arch-t" x="380" y="357">Scoring Engine</text>
+        <text class="arch-s" x="380" y="374">0–100 similarity ranking</text>
+
+        <path class="flow" d="M380 388 V426" marker-end="url(#arrG)"/>
+
+        <rect class="arch-box ml" x="280" y="426" width="200" height="52" rx="10"/>
+        <text class="arch-t" x="380" y="447">ML Shadow Model</text>
+        <text class="arch-s" x="380" y="464">predictions logged · not applied</text>
+
+        <path class="flow" d="M380 478 V516" marker-end="url(#arrG)"/>
+
+        <rect class="arch-box" x="280" y="516" width="200" height="48" rx="10"/>
+        <text class="arch-t" x="380" y="535">Dashboard</text>
+        <text class="arch-s" x="380" y="552">explore collected data</text>
+      </svg>
+    </div>
+    <p class="arch-cap reveal">data flow: <code>GitHub API</code> → <code>Discovery Engine</code> → <code>Scoring Engine</code> → <code>ML Shadow Model</code> → <code>Dashboard</code></p>
+  </div>
+</section>
+
+<!-- ================= CTA ================= -->
+<section class="cta" id="cta" aria-label="Get started">
+  <div class="container">
+    <h2 class="reveal">Build your developer network <span class="grad">automatically</span></h2>
+    <p class="reveal" data-delay="80">Discover engineers who share your technical interests without manually searching through thousands of profiles.</p>
+    <a class="btn btn-primary reveal" data-delay="140" href="https://github.com/Lewickiy/github-follow-master" target="_blank" rel="noopener">
+      Open GitHub Repository
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8"/></svg>
+    </a>
+    <div class="cta-code reveal" data-delay="200"><span class="d">$</span> python main.py <span class="c">--silent</span></div>
+  </div>
+</section>
+
+</main>
+
+<!-- ================= FOOTER ================= -->
+<footer>
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a class="logo" href="#top">
+          <span class="logo-mark"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="3.4" fill="#2ea043"/><circle cx="4.5" cy="6" r="2" fill="#58a6ff"/><circle cx="19" cy="18" r="2" fill="#a78bfa"/><path d="M6.3 7.2 9.8 10M14.5 13.5l2.4 2.4" stroke="#fafafa" stroke-width="1.3"/></svg></span>
+          GitHub <em>Social</em> Agent
+        </a>
+        <p>A developer-discovery engine that analyses the GitHub graph and ranks developers by technical similarity to you.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Source</h4>
+        <ul>
+          <li><a href="https://github.com/Lewickiy/github-follow-master" target="_blank" rel="noopener">GitHub repository</a></li>
+          <li><a href="https://github.com/Lewickiy/github-follow-master#readme" target="_blank" rel="noopener">README</a></li>
+          <li><a href="https://github.com/Lewickiy/github-follow-master/blob/main/documentation/API_using.md" target="_blank" rel="noopener">API docs</a></li>
+          <li><a href="https://github.com/Lewickiy/github-follow-master/blob/main/documentation/Analyse.md" target="_blank" rel="noopener">Analysis</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Built with</h4>
+        <ul>
+          <li class="mono-item">Python · FastAPI</li>
+          <li class="mono-item">SQLite · PyTorch</li>
+          <li class="mono-item">React · Docker</li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 GitHub Social Agent</span>
+      <span>Demo values are illustrative · Not affiliated with GitHub, Inc.</span>
+      <a href="#top">Back to top ↑</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function(){
+'use strict';
+
+var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ================= helpers ================= */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+
+function $id(id){return document.getElementById(id)}
+
+/* ================= header / progress / active nav ================= */
+var header=$id('header'), progress=$id('progress'), ticking=false;
+function updateHeader(){
+  var y=window.scrollY;
+  header.classList.toggle('scrolled',y>10);
+  var h=document.documentElement.scrollHeight-window.innerHeight;
+  progress.style.width=(h>0?(y/h)*100:0)+'%';
+  var cur='';
+  var secs=document.querySelectorAll('main section[id]');
+  for(var i=0;i<secs.length;i++){if(secs[i].getBoundingClientRect().top<=140)cur=secs[i].id}
+  var links=document.querySelectorAll('.nav-links a');
+  for(var j=0;j<links.length;j++){links[j].classList.toggle('active',links[j].getAttribute('href')==='#'+cur)}
+}
+window.addEventListener('scroll',function(){if(!ticking){requestAnimationFrame(function(){ticking=false;updateHeader()});ticking=true}},{passive:true});
+updateHeader();
+
+/* mobile menu */
+var burger=$id('burger'), navLinks=$id('navLinks');
+burger.addEventListener('click',function(){
+  var open=navLinks.classList.toggle('open');
+  burger.classList.toggle('open',open);
+  burger.setAttribute('aria-expanded',open?'true':'false');
+});
+navLinks.addEventListener('click',function(e){
+  if(e.target.tagName==='A'){
+    navLinks.classList.remove('open');
+    burger.classList.remove('open');
+    burger.setAttribute('aria-expanded','false');
+  }
+});
+
+/* ================= reveal on scroll ================= */
+var revealEls=document.querySelectorAll('.reveal');
+if('IntersectionObserver' in window){
+  var io=new IntersectionObserver(function(entries){
+    entries.forEach(function(en){
+      if(en.isIntersecting){en.target.classList.add('visible');io.unobserve(en.target)}
+    });
+  },{threshold:.12,rootMargin:'0px 0px -40px 0px'});
+  revealEls.forEach(function(el){io.observe(el)});
+}else{
+  revealEls.forEach(function(el){el.classList.add('visible')});
+}
+document.querySelectorAll('[data-delay]').forEach(function(el){el.style.transitionDelay=el.getAttribute('data-delay')+'ms'});
+
+/* ================= count-up + ring ================= */
+function animateValue(el,to,dur){
+  dur=dur||700;
+  var from=parseFloat(el.getAttribute('data-v')||'0');
+  if(to===from)return;
+  var start=performance.now();
+  (function frame(now){
+    var p=Math.min(1,(now-start)/dur);
+    var e=1-Math.pow(1-p,3);
+    var v=Math.round(from+(to-from)*e);
+    el.textContent=v;
+    el.setAttribute('data-v',v);
+    if(p<1)requestAnimationFrame(frame);
+  })(start);
+}
+function setRing(wrap,pct){
+  var c=2*Math.PI*52;
+  var fg=wrap.querySelector('.ring-fg');
+  fg.style.strokeDashoffset=c*(1-pct/100);
+}
+
+/* ================= hero graph (canvas) ================= */
+var wrap=$id('heroCanvasWrap'), canvas=$id('heroCanvas');
+if(wrap&&canvas&&canvas.getContext){
+  var ctx=canvas.getContext('2d');
+  var tip=$id('graphTip');
+  var PIPE=[
+    {label:'Your GitHub Profile',sub:'owner baseline'},
+    {label:'Technology Fingerprint',sub:'languages · topics'},
+    {label:'Developer Discovery Graph',sub:'follower network'},
+    {label:'Relevant Connections',sub:'ranked by similarity'}
+  ];
+  var DEVS=[
+    {name:'michael',lang:'go'},
+    {name:'ana',lang:'rust'},
+    {name:'leo',lang:'java'},
+    {name:'iris',lang:'python'},
+    {name:'dmitry',lang:'c++'},
+    {name:'sofia',lang:'js'},
+    {name:'kenji',lang:'rust'},
+    {name:'nina',lang:'go'},
+    {name:'omar',lang:'ts'}
+  ];
+  var W=0,H=0,dpr=1,nodeH=52;
+  var pipes=[],nodes=[],edges=[];
+  var rng=mulberry32(1337);
+  var t=0,last=performance.now(),raf=null,running=false,hover=null;
+
+  function rr(x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();
+  }
+  function layout(){
+    var rect=wrap.getBoundingClientRect();
+    W=Math.max(1,rect.width);H=Math.max(1,rect.height);
+    dpr=Math.max(1,Math.min(window.devicePixelRatio||1,2));
+    canvas.width=Math.round(W*dpr);canvas.height=Math.round(H*dpr);
+    canvas.style.width=W+'px';canvas.style.height=H+'px';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    var narrow=W<450;
+    var count=narrow?0:DEVS.length;
+    /* center the column and always keep every node inside the frame */
+    var x=narrow?W/2:Math.round(W*0.30);
+    var nw=narrow?Math.min(190,W-20):200;
+    var margin=Math.max(28,Math.round(H*0.07));
+    /* vertical fit: 4 nodes + 3 visible gaps (>= gapMin) inside the frame */
+    var avail=H-2*margin,gapMin=16;
+    var nh=Math.min(52,Math.max(36,Math.floor((avail-3*gapMin)/4)));
+    var gap=(avail-4*nh)/3;
+    if(gap<gapMin){nh=Math.max(36,Math.floor((avail-3*gapMin)/4));gap=(avail-4*nh)/3}
+    var step=nh+gap;
+    var y0=margin;
+    nodeH=nh;
+    pipes=PIPE.map(function(p,i){
+      return{x:x-nw/2,y:Math.round(y0+i*step),w:nw,h:nh,label:p.label,sub:p.sub};
+    });
+    nodes=[];
+    pipes.forEach(function(p,i){
+      nodes.push({kind:'pipe',x:x,y:p.y+nh/2,r:nh/2+8,name:p.label,sub:p.sub});
+    });
+    if(count){
+      var hub=nodes[2],tries=0;
+      while(nodes.length<2+count&&tries<500){
+        tries++;
+        var cx=W*0.60+(rng()-0.5)*W*0.42;
+        var cy=H*0.14+rng()*H*0.72;
+        if(cx<x+86)continue;
+        if(Math.hypot(cx-hub.x,cy-hub.y)<72)continue;
+        var clash=false;
+        for(var i=0;i<nodes.length;i++){var n=nodes[i];if(n.kind==='dev'&&Math.hypot(cx-n.x,cy-n.y)<48){clash=true;break}}
+        if(clash)continue;
+        var d=DEVS[nodes.length-2];
+        nodes.push({kind:'dev',x:cx,y:cy,r:9+rng()*5,baseX:cx,baseY:cy,speed:.5+rng()*.9,phase:rng()*Math.PI*2,name:d.name,sub:d.lang});
+      }
+    }
+    edges=[];
+    var hub2=count?nodes[2]:null;
+    if(hub2){
+      nodes.forEach(function(n){
+        if(n.kind==='dev')edges.push({a:hub2,b:n,pulse:true,speed:.2+rng()*.35});
+      });
+      var devs=nodes.filter(function(n){return n.kind==='dev'});
+      for(var i=0;i<devs.length;i++){
+        for(var j=i+1;j<devs.length;j++){
+          if(edges.length<30&&Math.hypot(devs[i].x-devs[j].x,devs[i].y-devs[j].y)<150){
+            edges.push({a:devs[i],b:devs[j],pulse:false});
+          }
+        }
+      }
+    }
+  }
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    /* drift */
+    nodes.forEach(function(n){
+      if(n.kind==='dev'){
+        n.x=n.baseX+Math.sin(t*0.001*n.speed+n.phase)*6;
+        n.y=n.baseY+Math.cos(t*0.001*n.speed*0.8+n.phase)*6;
+      }
+    });
+    /* hub -> dev edges + pulses */
+    ctx.lineWidth=1;
+    edges.forEach(function(e){
+      ctx.strokeStyle=e.pulse?'rgba(46,160,67,.32)':'rgba(88,166,255,.14)';
+      ctx.beginPath();ctx.moveTo(e.a.x,e.a.y);ctx.lineTo(e.b.x,e.b.y);ctx.stroke();
+      if(e.pulse){
+        var p=((t*0.0006*e.speed)%1+1)%1;
+        var qx=e.a.x+(e.b.x-e.a.x)*p,qy=e.a.y+(e.b.y-e.a.y)*p;
+        ctx.fillStyle='#2ea043';
+        ctx.shadowColor='rgba(46,160,67,.9)';ctx.shadowBlur=8;
+        ctx.beginPath();ctx.arc(qx,qy,2.6,0,Math.PI*2);ctx.fill();
+        ctx.shadowBlur=0;
+      }
+    });
+    /* pipeline connectors */
+    ctx.strokeStyle='rgba(46,160,67,.55)';ctx.lineWidth=1.4;
+    for(var i=0;i<pipes.length-1;i++){
+      var a=pipes[i],b=pipes[i+1];
+      var y1=a.y+a.h,y2=b.y;
+      ctx.beginPath();ctx.moveTo(a.x+a.w/2,y1);ctx.lineTo(a.x+a.w/2,y2);ctx.stroke();
+      ctx.fillStyle='rgba(46,160,67,.55)';
+      ctx.beginPath();
+      ctx.moveTo(a.x+a.w/2-4,y2);ctx.lineTo(a.x+a.w/2+4,y2);ctx.lineTo(a.x+a.w/2,y2+6);ctx.closePath();ctx.fill();
+      var p=((t*0.0008)%1+1)%1;
+      var qy=y1+(y2-y1)*p;
+      ctx.fillStyle='#2ea043';
+      ctx.shadowColor='rgba(46,160,67,.9)';ctx.shadowBlur=8;
+      ctx.beginPath();ctx.arc(a.x+a.w/2,qy,2.8,0,Math.PI*2);ctx.fill();
+      ctx.shadowBlur=0;
+    }
+    /* pipeline nodes */
+    pipes.forEach(function(p,i){
+      var isHub=i===2;
+      ctx.fillStyle='rgba(24,24,27,.94)';
+      if(isHub){ctx.shadowColor='rgba(46,160,67,.35)';ctx.shadowBlur=18}
+      rr(p.x,p.y,p.w,p.h,10);ctx.fill();
+      ctx.shadowBlur=0;
+      ctx.strokeStyle=isHub?'rgba(46,160,67,.75)':'rgba(255,255,255,.12)';
+      ctx.lineWidth=isHub?1.6:1;
+      rr(p.x,p.y,p.w,p.h,10);ctx.stroke();
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      var compact=nodeH<44;
+      ctx.font=(compact?"600 10px":"600 11.5px")+" 'JetBrains Mono',monospace";
+      ctx.fillStyle='#e4e4e7';
+      ctx.fillText(p.label,p.x+p.w/2,p.y+p.h/2-(compact?6:7));
+      ctx.font=(compact?"8.5px":"9.5px")+" 'JetBrains Mono',monospace";
+      ctx.fillStyle='#71717a';
+      ctx.fillText(p.sub,p.x+p.w/2,p.y+p.h/2+(compact?8:9));
+    });
+    /* dev nodes */
+    nodes.forEach(function(n){
+      if(n.kind!=='dev')return;
+      var isHov=hover===n;
+      ctx.fillStyle='#1d1d21';
+      if(isHov){ctx.shadowColor='rgba(46,160,67,.7)';ctx.shadowBlur=14}
+      ctx.beginPath();ctx.arc(n.x,n.y,n.r,0,Math.PI*2);ctx.fill();
+      ctx.shadowBlur=0;
+      ctx.strokeStyle=isHov?'#2ea043':'rgba(148,163,184,.4)';
+      ctx.lineWidth=isHov?2:1.3;
+      ctx.beginPath();ctx.arc(n.x,n.y,n.r,0,Math.PI*2);ctx.stroke();
+      ctx.fillStyle=isHov?'#d1fadf':'#9ca3af';
+      ctx.font="600 8px 'JetBrains Mono',monospace";
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText(n.name.slice(0,2).toUpperCase(),n.x,n.y+0.5);
+    });
+  }
+  function hit(mx,my){
+    var best=null,bd=24;
+    nodes.forEach(function(n){
+      var d=Math.hypot(mx-n.x,my-n.y);
+      if(d<bd&&d<n.r+8){best=n;bd=d}
+    });
+    return best;
+  }
+  function showTip(n){
+    tip.style.display='block';
+    var tx=Math.min(W-130,Math.max(4,n.x+16));
+    var ty=Math.max(4,n.y-30);
+    tip.style.left=tx+'px';tip.style.top=ty+'px';
+    tip.className='graph-tip'+(n.kind==='dev'?' dev':'');
+    tip.innerHTML='<span class="tip-name">'+n.name+'</span><span class="tip-sub">&nbsp;· '+n.sub+'</span>';
+  }
+  wrap.addEventListener('mousemove',function(e){
+    var r=wrap.getBoundingClientRect();
+    hover=hit(e.clientX-r.left,e.clientY-r.top);
+    canvas.style.cursor=hover?'pointer':'default';
+    if(hover)showTip(hover);else tip.style.display='none';
+  });
+  wrap.addEventListener('mouseleave',function(){hover=null;tip.style.display='none'});
+  function loop(now){
+    if(!running){raf=null;return}
+    var dt=Math.min(50,now-last);last=now;t+=dt;
+    draw();
+    raf=requestAnimationFrame(loop);
+  }
+  function start(){if(raf)return;last=performance.now();raf=requestAnimationFrame(loop)}
+  function stop(){if(raf){cancelAnimationFrame(raf);raf=null}}
+  layout();draw();
+  if(!reduceMotion){
+    if('IntersectionObserver' in window){
+      var gio=new IntersectionObserver(function(es){
+        es.forEach(function(en){
+          running=en.isIntersecting;
+          if(running)start();else stop();
+        });
+      },{threshold:.02});
+      gio.observe(wrap);
+    }else{running=true;start()}
+  }
+  /* relayout whenever the frame size actually changes (zoom, fonts, media queries, resize) */
+  if(window.ResizeObserver){
+    var ro=new ResizeObserver(function(){layout();if(!running||reduceMotion)draw()});
+    ro.observe(wrap);
+  }else{
+    window.addEventListener('resize',function(){layout();if(!running||reduceMotion)draw()});
+  }
+  if(document.fonts&&document.fonts.ready)document.fonts.ready.then(function(){if(!running||reduceMotion)draw()});
+  document.addEventListener('visibilitychange',function(){
+    if(document.hidden)stop();
+    else if(running&&!reduceMotion)start();
+  });
+}
+
+/* ================= interactive demo ================= */
+var demo=$id('demo');
+if(demo){
+  var YOUR={java:45,python:25,javascript:15};
+  var YOUR_TOPICS=['backend','spring','docker','kubernetes'];
+  var RELATED={cloud:'kubernetes',kubernetes:'cloud'};
+  var LANGS={java:{name:'Java',c:'#b07219'},python:{name:'Python',c:'#3572A5'},go:{name:'Go',c:'#00ADD8'}};
+  var DEFAULTS={java:50,python:20,go:10,topics:['backend','spring','docker','cloud']};
+  var state={java:DEFAULTS.java,python:DEFAULTS.python,go:DEFAULTS.go,topics:DEFAULTS.topics.slice()};
+
+  var sliders={java:$id('sliderJava'),python:$id('sliderPython'),go:$id('sliderGo')};
+  var vals={java:$id('valJava'),python:$id('valPython'),go:$id('valGo'),other:$id('valOther')};
+  var bars={other:$id('barOther')};
+  var chips=Array.prototype.slice.call(document.querySelectorAll('.topic-chip[data-topic]'));
+  var prev={lang:0,topic:0,act:0,qual:0};
+
+  function candLangs(){
+    var c={java:state.java,python:state.python,go:state.go,javascript:0};
+    var sum=c.java+c.python+c.go+c.javascript;
+    c.other=Math.max(0,100-sum);
+    return c;
+  }
+  function clampSliders(){
+    Object.keys(sliders).forEach(function(k){
+      var others=0;
+      Object.keys(sliders).forEach(function(x){if(x!==k)others+=state[x]});
+      var max=Math.max(0,100-others);
+      sliders[k].max=max;
+      if(state[k]>max)state[k]=max;
+    });
+  }
+  function paintSliders(){
+    Object.keys(sliders).forEach(function(k){
+      var max=sliders[k].max||100;
+      var pct=Math.round(state[k]/max*100);
+      sliders[k].value=state[k];
+      sliders[k].style.setProperty('--p',pct+'%');
+      vals[k].textContent=state[k]+'%';
+    });
+    var c=candLangs();
+    vals.other.textContent=c.other+'%';
+    bars.other.style.width=c.other+'%';
+  }
+  function paintChips(){
+    chips.forEach(function(ch){ch.classList.toggle('active',state.topics.indexOf(ch.getAttribute('data-topic'))>-1)});
+  }
+  function flash(fill){
+    fill.classList.remove('flash');
+    void fill.offsetWidth;
+    fill.classList.add('flash');
+  }
+  function setFactor(fillId,val,max,valId,prevKey,flashIt){
+    var fill=$id(fillId),valEl=$id(valId);
+    var pct=Math.round(val/max*100);
+    fill.style.width=pct+'%';
+    valEl.textContent=val;
+    if(flashIt&&prev[prevKey]!==val)flash(fill);
+    prev[prevKey]=val;
+  }
+  function update(animate){
+    var c=candLangs();
+    /* language: histogram overlap of displayed stacks */
+    var overlap=Math.min(YOUR.java,c.java)+Math.min(YOUR.python,c.python)+Math.min(YOUR.javascript,c.javascript);
+    var language=Math.max(0,Math.min(30,Math.round(30*overlap/65)));
+    /* topics */
+    var matched=0,shared=[],related=[];
+    state.topics.forEach(function(tp){
+      if(YOUR_TOPICS.indexOf(tp)>-1){matched+=1;shared.push(tp)}
+      else if(RELATED[tp]){matched+=0.5;related.push(tp)}
+    });
+    var topic=Math.max(0,Math.min(20,Math.round(20*matched/4)));
+    var activity=12,quality=25,total=language+topic+activity+quality;
+
+    /* candidate remainder bar */
+    bars.other.style.width=c.other+'%';
+
+    setFactor('fLang',language,30,'vLang','lang',animate);
+    setFactor('fTopic',topic,20,'vTopic','topic',animate);
+    setFactor('fAct',activity,15,'vAct','act',animate);
+    setFactor('fQual',quality,35,'vQual','qual',animate);
+
+    /* impact */
+    var sharedLangs=[];
+    Object.keys(LANGS).forEach(function(k){
+      if(c[k]>0&&YOUR[k]>0)sharedLangs.push(LANGS[k].name);
+    });
+    var html='';
+    if(sharedLangs.length){
+      html+=impactRow('Shared languages',sharedLangs.join(', '),'+'+language);
+    }else{
+      html+=impactRow('Language overlap','none','+0');
+    }
+    if(shared.length){
+      html+=impactRow('Shared topics',shared.join(', '),'+'+topic);
+    }
+    related.forEach(function(rp){
+      html+=impactRow('Related topic',rp+' ≈ '+RELATED[rp]+' (half credit)','');
+    });
+    if(!shared.length&&!related.length)html+=impactRow('Topic overlap','none','+0');
+    html+=impactRow('Simulated repository activity','recency signal','+'+activity);
+    html+=impactRow('Profile quality signals','bio · repos · followers','+'+quality);
+    $id('impactList').innerHTML=html;
+
+    /* ring + number */
+    if(animate){
+      animateValue($id('scoreNum'),total,600);
+    }else{
+      $id('scoreNum').textContent=0;
+      $id('scoreNum').setAttribute('data-v',0);
+    }
+    setRing($id('demoRing'),total);
+  }
+  function impactRow(label,sub,pts){
+    return '<div class="i-row"><span>'+label+'<span class="rel">&nbsp;· '+sub+'</span></span><span class="pts">'+pts+'</span></div>';
+  }
+
+  Object.keys(sliders).forEach(function(k){
+    sliders[k].addEventListener('input',function(){
+      state[k]=parseInt(sliders[k].value,10);
+      clampSliders();
+      paintSliders();
+      update(true);
+    });
+  });
+  chips.forEach(function(ch){
+    ch.addEventListener('click',function(){
+      var tp=ch.getAttribute('data-topic');
+      var idx=state.topics.indexOf(tp);
+      if(idx>-1)state.topics.splice(idx,1);
+      else state.topics.push(tp);
+      paintChips();
+      update(true);
+    });
+  });
+  $id('resetDemo').addEventListener('click',function(){
+    state={java:DEFAULTS.java,python:DEFAULTS.python,go:DEFAULTS.go,topics:DEFAULTS.topics.slice()};
+    clampSliders();paintSliders();paintChips();
+    update(true);
+  });
+
+  /* initial state: everything at 0, then animate on first view */
+  clampSliders();paintSliders();paintChips();
+  update(false);
+  var revealed=false;
+  if('IntersectionObserver' in window){
+    var demoIO=new IntersectionObserver(function(es){
+      es.forEach(function(en){
+        if(en.isIntersecting&&!revealed){
+          revealed=true;
+          update(true);
+          demoIO.unobserve(en.target);
+        }
+      });
+    },{threshold:.25});
+    demoIO.observe($id('demoResult'));
+  }else{revealed=true;update(true)}
+}
+
+/* ================= scoring section animation ================= */
+var scSec=$id('scoring');
+if(scSec){
+  var scDone=false;
+  function playScoring(){
+    if(scDone)return;
+    scDone=true;
+    animateValue($id('scScoreNum'),85,1100);
+    setRing($id('scRing'),85);
+    var fills=scSec.querySelectorAll('.factor-list .fill');
+    for(var i=0;i<fills.length;i++){fills[i].style.width=fills[i].getAttribute('data-w')}
+    var segs=scSec.querySelectorAll('.stack-bar .seg');
+    for(var j=0;j<segs.length;j++){segs[j].style.transform='scaleX(1)'}
+  }
+  if('IntersectionObserver' in window){
+    var scIO=new IntersectionObserver(function(es){
+      es.forEach(function(en){if(en.isIntersecting){playScoring();scIO.unobserve(en.target)}});
+    },{threshold:.3});
+    scIO.observe(scSec);
+  }else{playScoring()}
+}
+})();
+</script>
+</body>
+</html>
