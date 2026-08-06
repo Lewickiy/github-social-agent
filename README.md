@@ -12,6 +12,14 @@
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED)]()
 
 ---
+## Disclaimer
+
+This project uses the GitHub API and must be used according to
+GitHub's Terms of Service and API usage policies.
+
+Automated actions such as following users should be configured
+responsibly.
+---
 
 ## Be Found — and Followed Back
 
@@ -525,4 +533,8 @@ In the `documentation/` directory:
 
 ---
 
-**Built for meaningful growth on GitHub.**
+## License
+
+This project is licensed under the Apache License 2.0.
+
+See the [LICENSE](/LICENSE.md) file for details.
