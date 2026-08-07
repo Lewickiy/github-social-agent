@@ -59,6 +59,109 @@ class Database:
         self.conn.commit()
 
     # --------------------------------------------------
+    # Worker status — dashboard toggle + liveness per worker
+    # --------------------------------------------------
+    # One row per background worker (workers/*.py).  ``enabled`` is the
+    # Management-tab pause/resume toggle; started/stopped/last action/last
+    # error/heartbeat drive the worker-activity card.  All methods degrade
+    # gracefully when the worker_status table does not exist yet (migrations
+    # not applied): status writes become no-ops and ``worker_enabled``
+    # defaults to True, so the bot never breaks on an un-migrated database.
+
+    def _worker_status_cols(self):
+        """Column names of worker_status (schema sync like _job_row_to_dict).
+
+        Only the *found* result is cached — a process that starts before
+        the migration runs re-checks on every call (a cheap sqlite_master
+        lookup) and picks the table up as soon as it exists.
+        """
+        if not hasattr(self, "_worker_status_columns"):
+            self._worker_status_columns = None
+        if self._worker_status_columns is None and self._table_exists("worker_status"):
+            self._worker_status_columns = [
+                r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(worker_status)"
+                ).fetchall()
+            ]
+        return self._worker_status_columns
+
+    def _update_worker_status(self, key, **fields):
+        """Upsert worker *key*'s row setting the given columns.
+
+        No-op when the worker_status table does not exist (pre-migration),
+        so workers and the API keep working on older databases.
+        """
+        if not self._worker_status_cols():
+            return
+        cols = ", ".join(fields)
+        placeholders = ", ".join("?" for _ in fields)
+        updates = ", ".join(f"{c} = excluded.{c}" for c in fields)
+        self.conn.execute(
+            f"INSERT INTO worker_status (name, {cols}) VALUES (?, {placeholders}) "
+            f"ON CONFLICT(name) DO UPDATE SET {updates}",
+            (key, *fields.values()),
+        )
+        self.conn.commit()
+
+    def worker_enabled(self, key, default=True):
+        """True when worker *key* is toggled on (default when table/row missing)."""
+        if not self._worker_status_cols():
+            return default
+        row = self.conn.execute(
+            "SELECT enabled FROM worker_status WHERE name = ?", (key,),
+        ).fetchone()
+        return bool(row[0]) if row else default
+
+    def set_worker_enabled(self, key, enabled):
+        """Persist the Management-tab toggle for worker *key*."""
+        self._update_worker_status(key, enabled=1 if enabled else 0)
+
+    def mark_worker_started(self, key):
+        """Record that worker *key* just started (clears the stopped marker)."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(
+            key, started_at=now, stopped_at=None, heartbeat_at=now,
+        )
+
+    def mark_worker_stopped(self, key):
+        """Record that worker *key* stopped cleanly (heartbeat cleared → offline)."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(key, stopped_at=now, heartbeat_at=None)
+
+    def mark_worker_action(self, key):
+        """Record that worker *key* just completed a unit of work."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(key, last_action_at=now)
+
+    def mark_worker_error(self, key, error):
+        """Record the last error of worker *key* (message + timestamp)."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(key, last_error_at=now, last_error=error)
+
+    def touch_worker_heartbeat(self, key):
+        """Record a liveness tick for worker *key*."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(key, heartbeat_at=now)
+
+    def worker_status(self, key):
+        """Return worker *key*'s row as a dict, or {} when absent."""
+        cols = self._worker_status_cols()
+        if not cols:
+            return {}
+        row = self.conn.execute(
+            "SELECT * FROM worker_status WHERE name = ?", (key,),
+        ).fetchone()
+        return dict(zip(cols, row)) if row else {}
+
+    def worker_statuses(self):
+        """Return all worker_status rows as dicts (empty pre-migration)."""
+        cols = self._worker_status_cols()
+        if not cols:
+            return []
+        rows = self.conn.execute("SELECT * FROM worker_status").fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+
+    # --------------------------------------------------
     # Users
     # --------------------------------------------------
 

@@ -97,7 +97,7 @@ Simply "switch it on" once — and watch your GitHub network grow in a targeted,
 - **Daily snapshots** — at midnight in the user's timezone, followers / following / public repos are recorded for growth charts.
 - **Company enrichment** — `@org` mentions from the `company` field become organization profiles.
 - **Web dashboard** — 4 pages: analytics, candidates, ML, management.
-- **Job launching from the dashboard** — any bot mode starts with one click, with history, logs, and statuses.
+- **Worker control from the dashboard** — every background worker can be paused/resumed with a switch; per-worker lifecycle (started, stopped, last action, last error) is shown live.
 - **Docker deployment** — bot + dashboard in `docker-compose`; data and models survive rebuilds.
 
 ---
@@ -174,8 +174,8 @@ The dashboard is the system's "command center," styled after GitHub: a dark head
 
 ### Management
 
-- **Job launcher** — buttons for all bot modes: `silent` (main) and the "force/backfill" modes. A job runs as a background process; its status is visible in real time.
-- **Job history** — statuses (PENDING / RUNNING / SUCCESS / FAILED), duration, exit code, **log viewer** for each run.
+- **Workers** — switches for all six background daemon threads (follow, graph discovery, ML trainer, companies, followback check, snapshots). All are **active by default**; toggling one off pauses it and back on resumes it — no restart needed, the change applies on the worker's next cycle.
+- **Worker activity** — per-worker lifecycle from the `worker_status` table: when the worker started, stopped, last completed an action, and last hit an error (with the error message).
 - **Bot configuration** — current settings: follow limit, score threshold, freshness TTLs, ML retrain interval, etc.
 - **Timezone** — auto-detected from the browser; day boundaries depend on it (daily limit reset, midnight snapshots).
 - **Refresh interval** — a slider for the auto-refresh cadence of all pages.
@@ -399,9 +399,10 @@ python -m ml_service.evaluate --new-sample 300  # model quality diagnostics
 | `FOLLOW_INTERVAL_MAX_SECONDS` | `1800` | Maximum random pause between follows (30 min) |
 | `SILENT_FOLLOW_SCORE_THRESHOLD` | `35` | Minimum score for auto-following |
 | `SILENT_WORKERS` | `2` | Parallel silent-mode threads |
-| `FOLLOW_WORKER_ENABLED` | `True` | Enable the dedicated follow-worker thread |
+| `FOLLOW_WORKER_ENABLED` | `True` | Fresh-install default of the Follow worker toggle (runtime control: Management → Workers) |
 | `FOLLOW_WORKER_POLL_INTERVAL_SECONDS` | `60` | How often the follow worker re-checks the queue when idle |
 | `SILENT_CONTINUOUS` | `True` | Continuous mode (don't exit after the queue) |
+| `DISCOVERY_WORKER_ENABLED` | `True` | Fresh-install default of the Graph-discovery worker toggle |
 | `DISCOVERY_RATE_LIMIT_PER_HOUR` | `500` | Hourly request budget of the graph-growth worker |
 | `DISCOVERY_PASS_MAX_USERS` | `500` | Users per graph-growth pass |
 | `ML_ENABLED` | `True` | Enable ML predictions |
@@ -491,6 +492,7 @@ SQLite database (`data/github_social.db`, WAL mode). In Docker the whole `./data
 | `ml_training_runs` | ML model retrain history |
 | `discovery_runs` | Graph-growth worker pass history |
 | `settings` | User settings (e.g., timezone) |
+| `worker_status` | Per-worker toggle + lifecycle (started/stopped/action/error/heartbeat) |
 | `migrations` | Applied-migration tracking |
 
 **Migrations:**
