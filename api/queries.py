@@ -415,18 +415,19 @@ def list_users(db, q=None, status=None, language=None, ml=None,
     ``ml`` may be ``None`` (no filter), 0, 1, or "none" (users with a
     NULL prediction).  Returns ``(items, total)``.  Each item carries
     the user's top-3 languages for the language dots in the table.
+
+    Deleted users are included in the default (no status filter) view,
+    carrying a ``DELETED`` status badge — soft deletion keeps their rows
+    (status history / activity feed), so the full pipeline state stays
+    visible.  The explicit ``status='DELETED'`` filter still narrows to
+    them alone.
     """
     conn = db.conn
     # Current status comes from the materialised user_current_status table;
     # followed_at is its maintained FOLLOWED-transition time.  Filters are
-    # written against the narrow current_status table (NOT IN / IN subqueries)
-    # so the wide users rows are never scanned for the join.
-    where = [
-        "u.owner = 0",
-        "u.username NOT IN ("
-        "    SELECT username FROM user_current_status WHERE status = 'DELETED'"
-        ")",
-    ]
+    # written against the narrow current_status table (IN / NOT IN
+    # subqueries) so the wide users rows are never scanned for the join.
+    where = ["u.owner = 0"]
     params = []
 
     if q:
