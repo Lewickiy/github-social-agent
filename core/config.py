@@ -126,7 +126,11 @@ SILENT_FOLLOW_SCORE_THRESHOLD = 35  # minimum score to auto-follow (silent & Fol
 # scores, while the worker drains the follow queue at a random 20–30 min
 # interval between subscriptions and within DAILY_FOLLOW_LIMIT.  When no
 # qualifying users exist it simply waits — polling every
-# FOLLOW_WORKER_POLL_INTERVAL_SECONDS.  Disable with FOLLOW_WORKER_ENABLED.
+# FOLLOW_WORKER_POLL_INTERVAL_SECONDS.
+#
+# This flag only seeds the *fresh-install* default of the Management-tab
+# toggle (migration 027); at runtime the worker's enabled/disabled state
+# lives in the worker_status table and is controlled from the dashboard.
 FOLLOW_WORKER_ENABLED = True
 FOLLOW_WORKER_POLL_INTERVAL_SECONDS = 60
 
@@ -219,7 +223,9 @@ SILENT_CONTINUOUS = True
 
 # Grows the network by walking the follower graph at a conservative,
 # constant rate instead of in bursts.  Started automatically by --silent
-# (the only mode that needs growth); disable with DISCOVERY_WORKER_ENABLED.
+# (the only mode that needs growth).  DISCOVERY_WORKER_ENABLED only seeds
+# the fresh-install default of the Management-tab toggle (migration 027);
+# at runtime the worker's state lives in the worker_status table.
 #
 # Hard request cap: each pass walks at most DISCOVERY_PASS_MAX_USERS users
 # (~1 profile request each, plus a followers request when their count

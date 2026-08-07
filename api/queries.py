@@ -12,7 +12,6 @@ from core.config import (
     CURRENT_SCORE_VERSION,
     DISCOVERY_PASS_MAX_USERS,
     DISCOVERY_RATE_LIMIT_PER_HOUR,
-    DISCOVERY_WORKER_ENABLED,
     GITHUB_API_RATE_LIMIT,
     ML_MODEL_DIR,
 )
@@ -746,7 +745,9 @@ def discovery_stats(db):
         else 0.0
     )
     return {
-        "enabled": DISCOVERY_WORKER_ENABLED,
+        # The worker_status toggle (default active) is the source of truth
+        # — the Management tab pauses/resumes this worker at runtime.
+        "enabled": db.worker_enabled("graph_discovery"),
         "rate_limit_per_hour": DISCOVERY_RATE_LIMIT_PER_HOUR,
         "pass_max_users": DISCOVERY_PASS_MAX_USERS,
         "last_run": last,

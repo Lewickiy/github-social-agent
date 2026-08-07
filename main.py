@@ -26,7 +26,7 @@ import signal
 import sys
 import threading
 
-from core.config import DISCOVERY_WORKER_ENABLED, FOLLOW_WORKER_ENABLED, MY_USERNAME, SILENT_WORKERS
+from core.config import MY_USERNAME, SILENT_WORKERS
 from core.database import Database
 from core.github_client import GithubClient
 from core.logger import get_logger
@@ -211,6 +211,11 @@ def main():
     ml_worker = None
     snapshot_worker = None
     if long_running & set(sys.argv):
+        # All background workers start unconditionally — whether each one
+        # actually does work is controlled at runtime by the Management-tab
+        # toggle (worker_status.enabled, all active by default; see
+        # migration 027 and workers/runtime.py).  A paused worker simply
+        # waits, so it can be resumed from the UI without a restart.
         company_worker = CompanyWorker(_shutdown)
         company_worker.start()
         followback_worker = FollowbackCheckWorker(_shutdown)
@@ -221,9 +226,8 @@ def main():
         # NOTE: assumes a single bot process — a dashboard-launched
         # `silent` job alongside the docker bot would start a second
         # FollowWorker (the daily budget is shared via the actions table).
-        if FOLLOW_WORKER_ENABLED:
-            follow_worker = FollowWorker(_shutdown)
-            follow_worker.start()
+        follow_worker = FollowWorker(_shutdown)
+        follow_worker.start()
         ml_worker = MLTrainerWorker(_shutdown)
         ml_worker.start()
         snapshot_worker = SnapshotWorker(_shutdown)
@@ -235,7 +239,9 @@ def main():
     # users to the queue — silent itself only collects + scores (follows
     # are handled by the FollowWorker thread above).
     discovery_worker = None
-    if "--silent" in sys.argv and DISCOVERY_WORKER_ENABLED:
+    if "--silent" in sys.argv:
+        # Started for the main working mode; paused/resumed via the
+        # Management-tab toggle (worker_status.enabled, default active).
         discovery_worker = GraphDiscoveryWorker(_shutdown)
         discovery_worker.start()
 

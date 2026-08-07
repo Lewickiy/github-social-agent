@@ -29,8 +29,20 @@ from core.config import (
     DISCOVERY_RATE_LIMIT_PER_HOUR,
 )
 from core.logger import get_logger
+from workers.runtime import (
+    is_enabled,
+    mark_action,
+    mark_error,
+    mark_started,
+    mark_stopped,
+    sleep_interruptible,
+    wait_until_enabled,
+)
 
 log = get_logger(__name__)
+
+# Key of this worker in the worker_status table (dashboard toggle/status).
+WORKER_KEY = "graph_discovery"
 
 # One hourly budget window in seconds.
 _HOUR_SECONDS = 3600
@@ -119,24 +131,40 @@ class GraphDiscoveryWorker(threading.Thread):
             "%.1fs pacing).",
             self._rate_per_hour, self._pass_max_users, delay,
         )
+        mark_started(db, WORKER_KEY)
 
-        while not self._shutdown.is_set():
-            # One hourly budget window: a pass sized to the budget, then
-            # sleep out the remainder of the hour so the rate never
-            # exceeds DISCOVERY_RATE_LIMIT_PER_HOUR even when the pass
-            # finished early (e.g. fewer eligible users than the cap).
-            start = time.monotonic()
-            try:
-                self._run_pass(db, github, delay)
-            except Exception:
-                log.exception("Graph discovery worker error")
+        try:
+            while not self._shutdown.is_set():
+                if not is_enabled(db, WORKER_KEY):
+                    log.info("Graph discovery worker paused — waiting for enable")
+                    if not wait_until_enabled(db, WORKER_KEY, self._shutdown):
+                        break
+                    continue
 
-            deadline = start + _HOUR_SECONDS
-            while time.monotonic() < deadline and not self._shutdown.is_set():
-                time.sleep(1)
+                # One hourly budget window: a pass sized to the budget, then
+                # sleep out the remainder of the hour so the rate never
+                # exceeds DISCOVERY_RATE_LIMIT_PER_HOUR even when the pass
+                # finished early (e.g. fewer eligible users than the cap).
+                start = time.monotonic()
+                try:
+                    self._run_pass(db, github, delay)
+                    mark_action(db, WORKER_KEY)
+                except Exception as exc:
+                    mark_error(
+                        db, WORKER_KEY, f"{type(exc).__name__}: {exc}",
+                    )
+                    log.exception("Graph discovery worker error")
 
-        db.conn.close()
-        log.info("Graph discovery worker stopped.")
+                remaining = start + _HOUR_SECONDS - time.monotonic()
+                if not sleep_interruptible(
+                    self._shutdown, max(0.0, remaining),
+                    db=db, key=WORKER_KEY,
+                ):
+                    break
+        finally:
+            mark_stopped(db, WORKER_KEY)
+            db.conn.close()
+            log.info("Graph discovery worker stopped.")
 
     def _run_pass(self, db, github, delay):
         """Walk one bounded slice of the follower graph and record it.

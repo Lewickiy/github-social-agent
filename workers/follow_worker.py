@@ -46,8 +46,21 @@ from core.github_client import (
     first_wait_from_headers,
 )
 from core.logger import get_logger
+from workers.runtime import (
+    is_enabled,
+    mark_action,
+    mark_error,
+    mark_started,
+    mark_stopped,
+    sleep_interruptible,
+    touch_heartbeat,
+    wait_until_enabled,
+)
 
 log = get_logger(__name__)
+
+# Key of this worker in the worker_status table (dashboard toggle/status).
+WORKER_KEY = "follow"
 
 # Serialises the follow-queue drain.  The worker is the only follower in
 # the system, so the lock is a single-consumer invariant — it stays so the
@@ -102,6 +115,7 @@ class FollowWorker(threading.Thread):
 
         db = Database()
         github = GithubClient()
+        self._db = db  # heartbeat source for _sleep (kept alive during waits)
 
         log.info(
             "Follow worker started (threshold=%d, interval=%d–%ds, "
@@ -110,29 +124,47 @@ class FollowWorker(threading.Thread):
             FOLLOW_INTERVAL_MIN_SECONDS, FOLLOW_INTERVAL_MAX_SECONDS,
             DAILY_FOLLOW_LIMIT,
         )
+        mark_started(db, WORKER_KEY)
 
-        while not self._shutdown.is_set():
-            try:
-                outcome = self._drain_follow_queue(db, github)
-            except Exception:
-                log.exception("Follow worker error")
-                outcome = "empty"
+        try:
+            while not self._shutdown.is_set():
+                if not is_enabled(db, WORKER_KEY):
+                    log.info("Follow worker paused — waiting for enable")
+                    if not wait_until_enabled(db, WORKER_KEY, self._shutdown):
+                        break
+                    continue
 
-            if self._shutdown.is_set():
-                break
+                try:
+                    outcome = self._drain_follow_queue(db, github)
+                except Exception as exc:
+                    mark_error(db, WORKER_KEY, f"{type(exc).__name__}: {exc}")
+                    log.exception("Follow worker error")
+                    outcome = "empty"
 
-            if outcome == "exhausted":
-                log.info(
-                    "Daily follow budget reached (%d/%d) — next attempt "
-                    "after local midnight.",
-                    db.today_follows(), DAILY_FOLLOW_LIMIT,
-                )
-                self._sleep(self._seconds_until_midnight(db))
-            else:
-                self._sleep(self._poll_interval)
+                if self._shutdown.is_set():
+                    break
 
-        db.conn.close()
-        log.info("Follow worker stopped.")
+                if outcome == "exhausted":
+                    log.info(
+                        "Daily follow budget reached (%d/%d) — next attempt "
+                        "after local midnight.",
+                        db.today_follows(), DAILY_FOLLOW_LIMIT,
+                    )
+                    if not sleep_interruptible(
+                        self._shutdown, self._seconds_until_midnight(db),
+                        db=db, key=WORKER_KEY,
+                    ):
+                        break
+                elif outcome != "paused":
+                    if not sleep_interruptible(
+                        self._shutdown, self._poll_interval,
+                        db=db, key=WORKER_KEY,
+                    ):
+                        break
+        finally:
+            mark_stopped(db, WORKER_KEY)
+            db.conn.close()
+            log.info("Follow worker stopped.")
 
     # ------------------------------------------------------------------
     # Queue drain (best score first — fresh query per follow)
@@ -146,6 +178,10 @@ class FollowWorker(threading.Thread):
         scored candidates yet), ``"stopped"`` on shutdown / errors.
         """
         while not self._shutdown.is_set():
+            # Toggled off mid-drain — stop following and let run() pause.
+            if not is_enabled(db, WORKER_KEY):
+                return "paused"
+
             # Fresh selection before every follow — the analysis pipeline
             # keeps updating scores and statuses in the DB, so the queue
             # is always re-read with the newest data.
@@ -252,6 +288,7 @@ class FollowWorker(threading.Thread):
             # re-confirmation, not a new follow, so the daily-follow
             # counter and activity feed stay accurate).
             db.mark_followed_existing(username)
+            mark_action(db, WORKER_KEY)
             log.debug("Already following %s — marked FOLLOWED", username)
             return "already"
 
@@ -259,6 +296,7 @@ class FollowWorker(threading.Thread):
         try:
             if github.follow(username):
                 db.mark_followed(username)
+                mark_action(db, WORKER_KEY)
                 log.info(
                     "Followed %s (score %d) [%d/%d]",
                     username, score, db.today_follows(), DAILY_FOLLOW_LIMIT,
@@ -344,6 +382,9 @@ class FollowWorker(threading.Thread):
         while time.monotonic() < deadline:
             if self._shutdown.is_set():
                 return False
+            # Keep the liveness heartbeat fresh even during long waits
+            # (rate-limit cooldowns, overnight sleeps).
+            touch_heartbeat(getattr(self, "_db", None), WORKER_KEY)
             remaining = deadline - time.monotonic()
             time.sleep(max(0.0, min(1.0, remaining)))
         return not self._shutdown.is_set()

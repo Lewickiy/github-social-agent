@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -46,6 +47,8 @@ from api.queries import (
 from core.config import DAILY_FOLLOW_LIMIT
 from core.database import Database
 from core.tz import DEFAULT_TIMEZONE, get_timezone_name, set_timezone, utc_offset_minutes
+from workers.registry import WORKERS
+from workers.runtime import ALIVE_WINDOW_SECONDS
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -518,6 +521,90 @@ def config_view():
         "follower_scan_days": cfg.FOLLOWER_SCAN_DAYS,
         "prioritize_small": cfg.SILENT_PRIORITIZE_SMALL,
     }
+
+
+# ── Worker control (background threads, dashboard Management tab) ─────────
+
+class WorkerToggle(BaseModel):
+    enabled: bool
+
+
+def _worker_item(meta, row):
+    """Merge registry metadata with a worker_status row into the API shape.
+
+    State semantics:
+      * ``stopped``  — the thread stopped cleanly (stopped_at set).
+      * ``running``  — started, not stopped, heartbeat fresh (alive now).
+      * ``paused``   — the same thread is alive but its toggle is off.
+      * ``unknown``  — started but the heartbeat went stale → the bot
+        process is down/crashed (or has not ticked yet).
+    """
+    started = row.get("started_at")
+    stopped = row.get("stopped_at")
+    heartbeat = row.get("heartbeat_at")
+    enabled = bool(row.get("enabled", True))
+
+    alive = bool(started) and not stopped and heartbeat is not None
+    if alive:
+        try:
+            age = (datetime.now(timezone.utc) -
+                   datetime.fromisoformat(heartbeat)).total_seconds()
+            alive = age < ALIVE_WINDOW_SECONDS
+        except (ValueError, TypeError):
+            alive = False
+
+    if stopped:
+        state = "stopped"
+    elif alive:
+        state = "running" if enabled else "paused"
+    else:
+        state = "unknown"
+
+    return {
+        "key": meta["key"],
+        "label": meta["label"],
+        "description": meta["description"],
+        "enabled": enabled,
+        "state": state,
+        "running": state == "running",
+        "started_at": started,
+        "stopped_at": stopped,
+        "last_action_at": row.get("last_action_at"),
+        "last_error_at": row.get("last_error_at"),
+        "last_error": row.get("last_error"),
+        "heartbeat_at": heartbeat,
+    }
+
+
+@app.get("/api/workers")
+def workers_view():
+    db = _db()
+    try:
+        rows = {w["name"]: w for w in db.worker_statuses()}
+    finally:
+        db.conn.close()
+    return {"items": [
+        _worker_item(meta, rows.get(meta["key"], {})) for meta in WORKERS
+    ]}
+
+
+@app.put("/api/workers/{key}")
+def worker_set(key: str, payload: WorkerToggle):
+    """Pause (enabled=false) or resume (enabled=true) a background worker."""
+    meta = next((w for w in WORKERS if w["key"] == key), None)
+    if meta is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown worker '{key}'. Allowed: "
+                   f"{', '.join(w['key'] for w in WORKERS)}",
+        )
+    db = _db()
+    try:
+        db.set_worker_enabled(key, payload.enabled)
+        row = db.worker_status(key) or {}
+    finally:
+        db.conn.close()
+    return _worker_item(meta, row)
 
 
 # ── Job control ───────────────────────────────────────────────────────────

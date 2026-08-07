@@ -26,18 +26,6 @@ export interface RecentAction {
   created_at: string;
 }
 
-export interface Job {
-  id: number;
-  mode: string;
-  status: "PENDING" | "RUNNING" | "SUCCESS" | "FAILED";
-  pid: number | null;
-  started_at: string | null;
-  finished_at: string | null;
-  exit_code: number | null;
-  error: string | null;
-  created_at: string | null;
-}
-
 export interface GitHubUsage {
   requests_last_hour: number;
   /** Requests within the selected Overview interval (null when not scoped). */
@@ -166,8 +154,29 @@ export interface Config {
   prioritize_small: boolean;
 }
 
-export interface JobsResponse {
-  items: Job[];
+/** Lifecycle of one background worker (worker_status table). */
+export type WorkerState = "running" | "paused" | "stopped" | "unknown";
+
+export interface WorkerStatus {
+  key: string;
+  label: string;
+  description: string;
+  /** Management-tab toggle — false = worker paused, true = active. */
+  enabled: boolean;
+  state: WorkerState;
+  running: boolean;
+  started_at: string | null;
+  stopped_at: string | null;
+  /** When the worker last completed a unit of work. */
+  last_action_at: string | null;
+  last_error_at: string | null;
+  last_error: string | null;
+  /** Liveness tick; a stale heartbeat means the bot process is down. */
+  heartbeat_at: string | null;
+}
+
+export interface WorkersResponse {
+  items: WorkerStatus[];
 }
 
 export interface Settings {
