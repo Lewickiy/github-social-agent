@@ -15,7 +15,9 @@ NULL`` **and** ``github_profile_json IS NOT NULL``.  Users without a full
 profile (the pre-2026-07-31 scoring pass) would otherwise feed a
 zero-filled vector — the exact data artifact documented in
 ``new_ml_model_analyse.md`` — so they are intentionally skipped and their
-prediction is left untouched.
+prediction is left untouched.  Soft-deleted users (current status
+DELETED) are excluded as well — they are gone from GitHub and must not
+be re-predicted.
 
 No GitHub API calls are made — feature vectors are built entirely from
 the DB (profile JSON, repo aggregates, languages, topics).
@@ -87,6 +89,9 @@ def recompute_all_predictions(db, batch=DEFAULT_BATCH, limit=None, verbose=False
         WHERE owner = 0
           AND repos_fetched_at IS NOT NULL
           AND github_profile_json IS NOT NULL
+          AND username NOT IN (
+              SELECT username FROM user_current_status WHERE status = 'DELETED'
+          )
         ORDER BY username
         """
     ).fetchall()

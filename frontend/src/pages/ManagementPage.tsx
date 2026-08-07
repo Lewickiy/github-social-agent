@@ -366,8 +366,12 @@ export default function ManagementPage() {
                                 mono
                             />
                             <Row
-                                label="Follow delay"
-                                value={`${config.follow_delay}s`}
+                                label="Follow interval"
+                                value={`${Math.round(
+                                    config.follow_interval_min_seconds / 60
+                                )}–${Math.round(
+                                    config.follow_interval_max_seconds / 60
+                                )}m`}
                                 mono
                             />
                             <Row
@@ -621,7 +625,7 @@ export default function ManagementPage() {
                     <Bot size={15} className="text-fg-muted"/>
                     <h2 className="text-[14px] font-semibold">CLI equivalents</h2>
                     <a
-                        href="https://github.com/Lewickiy/github-follow-master"
+                        href="https://github.com/Lewickiy/github-social-agent"
                         target="_blank"
                         rel="noreferrer"
                         className="ml-auto text-[12px] text-accent hover:underline inline-flex items-center gap-1"
@@ -630,10 +634,9 @@ export default function ManagementPage() {
                     </a>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[12px]">
-                    <CodeBox code="python main.py --silent" desc="Stealth collect + score + follow"/>
+                    <CodeBox code="python main.py --silent" desc="Stealth collect + score (follows via FollowWorker)"/>
                     <CodeBox code="python main.py --collect" desc="Discover users + fetch repos"/>
                     <CodeBox code="python main.py --score" desc="Score / re-score users"/>
-                    <CodeBox code="python main.py --follow" desc="Follow top-scored users"/>
                 </div>
             </div>
         </div>

@@ -75,7 +75,12 @@ HEADERS = _LazyHeaders()
 
 DAILY_FOLLOW_LIMIT = 50
 
-FOLLOW_DELAY = 60
+# Random pause between two follow actions (seconds).  The FollowWorker is
+# the only follower in the system: it spaces subscriptions 20–30 minutes
+# apart, so the daily budget (≈50 follows, one every ~25 min) is spread
+# across the whole day instead of being spent in a burst.
+FOLLOW_INTERVAL_MIN_SECONDS = 20 * 60
+FOLLOW_INTERVAL_MAX_SECONDS = 30 * 60
 
 DATABASE = os.getenv("DATABASE", "data/github_social.db")
 
@@ -96,7 +101,8 @@ SILENT_DELAY_BETWEEN_USERS = 1  # pause between users
 SILENT_DELAY_BETWEEN_REPOS = 1      # was 2 (throttled to avoid /languages abuse)
 SILENT_DELAY_BETWEEN_REQUESTS = 1   # was 3 (throttled to avoid rate-limit)
 SILENT_DELAY_BETWEEN_SCORES = 1  # pause between scoring users
-SILENT_DELAY_BETWEEN_FOLLOWS = 2  # pause between follow actions in silent mode
+# (Follow pacing is handled by the dedicated FollowWorker — a random
+# 20–30 min interval, see FOLLOW_INTERVAL_MIN/MAX_SECONDS below.)
 
 # Number of parallel workers that process the silent-mode queue.
 # 1 = original single-threaded behaviour; 2 roughly doubles the request
@@ -108,7 +114,21 @@ SILENT_WORKERS = 2
 # FOLLOW SCORING
 # =====================================================
 
-SILENT_FOLLOW_SCORE_THRESHOLD = 35  # minimum score to auto-follow in silent mode
+SILENT_FOLLOW_SCORE_THRESHOLD = 35  # minimum score to auto-follow (silent & FollowWorker)
+
+# =====================================================
+# FOLLOW WORKER — dedicated follow executor thread
+# =====================================================
+
+# Follows the queued candidates (NEW users with score >= threshold, best
+# score first) in a separate daemon thread (workers/follow_worker.py),
+# independently of the analysis pipeline: silent mode only collects +
+# scores, while the worker drains the follow queue at a random 20–30 min
+# interval between subscriptions and within DAILY_FOLLOW_LIMIT.  When no
+# qualifying users exist it simply waits — polling every
+# FOLLOW_WORKER_POLL_INTERVAL_SECONDS.  Disable with FOLLOW_WORKER_ENABLED.
+FOLLOW_WORKER_ENABLED = True
+FOLLOW_WORKER_POLL_INTERVAL_SECONDS = 60
 
 # =====================================================
 # OWNER FOLLOWER SCAN — cyclic check in silent mode
@@ -189,8 +209,8 @@ SILENT_MIN_OWNER_REPOS = 1
 # owner-follower scans run inside silent, while follower-graph growth is
 # handled by a separate calm background worker (see the DISCOVERY_* block
 # below).  When False, silent mode processes one batch and exits (legacy
-# one-shot behaviour).  Either way, --collect* / --score / --follow are
-# only needed as one-off force/backfill modes.
+# one-shot behaviour).  Either way, --collect* / --score are only needed
+# as one-off force/backfill modes.
 SILENT_CONTINUOUS = True
 
 # =====================================================

@@ -152,7 +152,9 @@ export interface LanguageOption {
 export interface Config {
   my_username: string;
   daily_follow_limit: number;
-  follow_delay: number;
+  /** Random pause between two follow actions (seconds, range). */
+  follow_interval_min_seconds: number;
+  follow_interval_max_seconds: number;
   score_threshold: number;
   current_score_version: number;
   ml_enabled: boolean;

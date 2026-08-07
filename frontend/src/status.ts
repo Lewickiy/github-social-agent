@@ -178,7 +178,6 @@ export const MODE_LABELS: Record<string, ModeMeta> = {
   "collect-users-rep": { label: "Collect repos", desc: "Fetch repos & languages", group: "force" },
   "collect-self": { label: "Sync owner", desc: "Refresh your own profile data", group: "force" },
   score: { label: "Score", desc: "Score / re-score all users", group: "force" },
-  follow: { label: "Follow", desc: "Follow top-scored users", group: "force" },
   snapshot: { label: "Snapshot", desc: "Record today's profile snapshot", group: "force" },
 };
 

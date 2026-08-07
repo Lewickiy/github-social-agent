@@ -57,7 +57,6 @@ JOB_MODES = {
     "collect-users-rep": ["--collect-users-rep"],
     "collect-self": ["--collect-self"],
     "score": ["--score"],
-    "follow": ["--follow"],
     "silent": ["--silent"],
     "snapshot": ["--snapshot"],
 }
@@ -507,7 +506,8 @@ def config_view():
     return {
         "my_username": cfg.MY_USERNAME,
         "daily_follow_limit": cfg.DAILY_FOLLOW_LIMIT,
-        "follow_delay": cfg.FOLLOW_DELAY,
+        "follow_interval_min_seconds": cfg.FOLLOW_INTERVAL_MIN_SECONDS,
+        "follow_interval_max_seconds": cfg.FOLLOW_INTERVAL_MAX_SECONDS,
         "score_threshold": cfg.SILENT_FOLLOW_SCORE_THRESHOLD,
         "current_score_version": cfg.CURRENT_SCORE_VERSION,
         "ml_enabled": cfg.ML_ENABLED,

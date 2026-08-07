@@ -138,9 +138,9 @@ class Database:
 
     def top_users(self, limit):
         # NULL scores (users without collected repos) are excluded — they
-        # carry no meaningful ranking and ``--follow`` logs them via %d.
-        # "Current status = NEW" (no lifecycle transition yet) is derived
-        # from user_status_history — the single store of statuses.
+        # carry no meaningful ranking.  "Current status = NEW" (no
+        # lifecycle transition yet) is derived from user_status_history —
+        # the single store of statuses.
         rows = self.conn.execute(
             """
             SELECT u.username, u.score
@@ -430,13 +430,87 @@ class Database:
         self.conn.commit()
 
     def mark_deleted(self, username):
-        """Mark *username* as DELETED (GitHub account no longer exists).
+        """Soft-delete *username* (GitHub account no longer exists).
+
+        The ``users`` row is kept — status history and the activity feed
+        must stay intact — but the account's footprint is stripped so a
+        deleted user can never be scored, followed, trained on or shown
+        with live-looking data:
+
+          * score / public_repos / followers / followers_count → 0,
+          * bio / company → NULL, ``scored_at`` → now,
+          * ML prediction → NULL,
+          * repositories (and their languages/topics links) and company
+            links are removed,
+          * the cached GitHub profile JSON keeps its static fields
+            (avatar, name, location, …) but its mutable counts
+            (followers / following / public_repos) are zeroed.
 
         Logs a DELETED event on the first transition so the activity feed
         shows account deletions without repeating them on later runs.
+        Idempotent — safe to call again on an already-deleted user.
         """
         if self._append_status(username, "DELETED"):
             self._log_action(username, "DELETED")
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Sanitize the cached profile: zero the mutable counts while
+        # keeping static fields (avatar, name, location, …) so the
+        # dashboard can still render the row without stale numbers.
+        row = self.conn.execute(
+            "SELECT github_profile_json FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if row and row[0]:
+            try:
+                data = json.loads(row[0])
+                if isinstance(data, dict):
+                    for key in ("followers", "following", "public_repos"):
+                        data[key] = 0
+                    self.conn.execute(
+                        "UPDATE users SET github_profile_json = ? WHERE username = ?",
+                        (json.dumps(data, ensure_ascii=False), username),
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass  # corrupt cache — nothing left to sanitize
+
+        self.conn.execute(
+            """
+            UPDATE users SET
+                score        = 0,
+                public_repos = 0,
+                followers    = 0,
+                followers_count = 0,
+                bio          = NULL,
+                company      = NULL,
+                scored_at    = ?,
+                ml_follow_prediction = NULL
+            WHERE username = ?
+            """,
+            (now, username),
+        )
+
+        # Strip repositories together with their language/topic links
+        # (no ON DELETE CASCADE between these tables) and company links.
+        # Subquery IN keeps one statement per table and is immune to
+        # SQLite's placeholder-count limit even for very repo-heavy users.
+        self.conn.execute(
+            "DELETE FROM repository_languages WHERE repository_id IN "
+            "(SELECT id FROM repositories WHERE user_id = ?)",
+            (username,),
+        )
+        self.conn.execute(
+            "DELETE FROM repository_topics WHERE repository_id IN "
+            "(SELECT id FROM repositories WHERE user_id = ?)",
+            (username,),
+        )
+        self.conn.execute(
+            "DELETE FROM repositories WHERE user_id = ?", (username,),
+        )
+        self.conn.execute(
+            "DELETE FROM user_companies WHERE username = ?", (username,),
+        )
         self.conn.commit()
 
     # --------------------------------------------------
@@ -1200,10 +1274,12 @@ class Database:
         self.conn.commit()
 
     def get_next_queued_user(self, threshold):
-        """Return the earliest NEW user with score >= threshold (FIFO).
+        """Return the highest-scored NEW user with score >= *threshold*.
 
-        Ordered by ``created_at ASC`` so the user who entered the system
-        first gets followed first.  Returns ``(username, score)`` or None.
+        Ordered by ``score DESC`` so the best candidate is subscribed to
+        first, tie-broken by ``created_at ASC`` (equally-scored users in
+        the order they entered the system).  Returns ``(username, score)``
+        or None.  Deleted users are excluded by the ``NEW`` status filter.
         """
         row = self.conn.execute(
             """
@@ -1211,12 +1287,20 @@ class Database:
             LEFT JOIN user_current_status c ON c.username = u.username
             WHERE COALESCE(c.status, 'NEW') = 'NEW'
               AND u.score >= ?
-            ORDER BY u.created_at ASC
+            ORDER BY u.score DESC, u.created_at ASC
             LIMIT 1
             """,
             (threshold,),
         ).fetchone()
         return row
+
+    def current_status(self, username):
+        """Return *username*'s current lifecycle status ('NEW' when none yet)."""
+        row = self.conn.execute(
+            "SELECT status FROM user_current_status WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else "NEW"
 
     def get_mutual_follow_users(self):
         """Return usernames for all confirmed mutual-follow users (FOLLOWBACK).

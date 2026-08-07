@@ -1,3 +1,9 @@
+# Имя Compose-проекта = имя системы (github-social-agent).
+# От него зависят имена контейнеров и образов:
+#   github-social-agent-github-bot-1
+#   github-social-agent-github-dashboard-1
+name: github-social-agent
+
 services:
   github-bot:
     build: .
