@@ -82,6 +82,45 @@ export function actionMeta(action: string): ActionMeta {
   return meta ? meta : { ...FALLBACK_ACTION, label: action };
 }
 
+// Interaction-event badges (Overview → Interactions feed, issue #23).
+// GitHub event types → human label + badge style.  Unknown future event
+// types fall back to the neutral badge with the raw type as the label.
+export const INTERACTION_META: Record<string, ActionMeta> = {
+  WatchEvent: {
+    label: "Starred",
+    cls: "bg-accent/10 text-accent border border-accent/30",
+  },
+  ForkEvent: {
+    label: "Forked",
+    cls: "bg-attention-subtle text-attention border border-attention/30",
+  },
+  IssuesEvent: {
+    label: "Opened an issue",
+    cls: "bg-danger-subtle text-danger-fg border border-danger/30",
+  },
+  PullRequestEvent: {
+    label: "Opened a PR",
+    cls: "bg-success-subtle text-success-fg border border-success/30",
+  },
+  IssueCommentEvent: {
+    label: "Commented",
+    cls: "bg-canvas-subtle text-fg-muted border border-border",
+  },
+  PullRequestReviewEvent: {
+    label: "Reviewed a PR",
+    cls: "bg-canvas-subtle text-fg-muted border border-border",
+  },
+  CreateEvent: {
+    label: "Created",
+    cls: "bg-canvas-subtle text-fg-muted border border-border",
+  },
+};
+
+export function interactionMeta(eventType: string): ActionMeta {
+  const meta = INTERACTION_META[eventType];
+  return meta ? meta : { ...FALLBACK_ACTION, label: eventType.replace(/Event$/, "") };
+}
+
 export const STATUS_ORDER = [
   "FOLLOWED",
   "FOLLOWBACK",

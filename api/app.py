@@ -39,6 +39,7 @@ from api.queries import (
     ml_state,
     overview_stats,
     recent_actions,
+    recent_interactions,
     score_buckets,
     status_distribution,
     total_actions,
@@ -338,6 +339,11 @@ def stats(days: int = Query(30, ge=1, le=365)):
             "status_distribution": status_distribution(db, days=days),
             "score_buckets": score_buckets(db, days=days),
             "recent_actions": recent_actions(db, days=days),
+            # People who interacted with our repos (issue #23) — always the
+            # latest feed, regardless of the interval toggle (interactions
+            # are their own timeline; the window toggle scopes the activity
+            # blocks only).
+            "interactions": recent_interactions(db, limit=8),
         }
     finally:
         db.conn.close()
@@ -416,6 +422,27 @@ def actions(days: int = Query(30, ge=1, le=365)):
     db = _db()
     try:
         return {"activity": activity_timeline(db, days=days)}
+    finally:
+        db.conn.close()
+
+
+@app.get("/api/interactions")
+def interactions(
+    limit: int = Query(12, ge=1, le=100),
+    actor: str | None = Query(None),
+    event_type: str | None = Query(None),
+):
+    """People who interacted with our repositories (issue #23).
+
+    Latest N rows of the ``interactions`` table, optionally filtered by
+    actor / event type.  Powers the Overview "Interactions" feed — the
+    attention the bot receives (stars, forks, issues, PRs on our repos).
+    """
+    db = _db()
+    try:
+        return {"items": recent_interactions(
+            db, limit=limit, actor=actor, event_type=event_type,
+        )}
     finally:
         db.conn.close()
 

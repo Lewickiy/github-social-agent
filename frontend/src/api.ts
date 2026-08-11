@@ -1,6 +1,7 @@
 import type {
   Config,
   DiscoveryState,
+  Interaction,
   LanguageOption,
   MLState,
   Settings,
@@ -61,6 +62,14 @@ export const api = {
   user: (username: string) =>
     get<UserProfile>(`/users/${encodeURIComponent(username)}`),
   languages: () => get<{ items: LanguageOption[] }>("/languages"),
+  interactions: (params: { limit?: number; actor?: string; event_type?: string } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+    }
+    const q = qs.toString();
+    return get<{ items: Interaction[] }>(`/interactions${q ? `?${q}` : ""}`);
+  },
   ml: () => get<MLState>("/ml"),
   discovery: () => get<DiscoveryState>("/discovery"),
   config: () => get<Config>("/config"),

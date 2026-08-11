@@ -424,6 +424,19 @@ def recent_actions(db, limit=12, days=None):
     ]
 
 
+def recent_interactions(db, limit=12, actor=None, event_type=None):
+    """Most recent interactions with the owner's repos (issue #23).
+
+    Thin wrapper over ``Database.list_interactions`` — the dashboard feed
+    for people who starred / forked / opened issues or PRs on our repos.
+    Empty when the migration has not been applied (the table does not
+    exist yet) or nothing has been recorded.
+    """
+    return db.list_interactions(
+        limit=limit, actor=actor, event_type=event_type,
+    )
+
+
 # ── Users list ────────────────────────────────────────────────────────────
 
 def list_users(db, q=None, status=None, language=None, ml=None,
