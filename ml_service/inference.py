@@ -8,6 +8,7 @@ inference utilities, not background worker logic.
 
 import json
 import os
+from datetime import datetime, timezone
 
 import torch
 
@@ -85,6 +86,16 @@ def predict_single(model, metadata, db, username):
         vec = build_feature_vector(
             profile_json, repo_agg, user_langs, user_topics,
             top_langs, top_topics, metadata["feature_order"],
+            # Interaction + source features (issue #25).  At inference the
+            # candidate is NOT followed yet, so every interaction recorded
+            # so far precedes the (future) follow by construction — feeding
+            # them is temporally safe and makes the interaction signal
+            # live for the follow gate (an all-zero vector would teach the
+            # model to ignore the strongest lead signal).
+            interactions=db.user_interactions_before(
+                username, datetime.now(timezone.utc).isoformat(),
+            ),
+            discovered_from=db.get_discovered_from(username),
         )
 
         tensor = torch.tensor([vec], dtype=torch.float32)

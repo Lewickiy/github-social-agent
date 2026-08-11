@@ -155,9 +155,21 @@ def train_and_save(db):
         user_langs = db.user_languages(username)
         user_topics = db.user_topics(username)
 
+        # Interaction features (issue #25): ONLY events before our follow
+        # — anything after would leak the label.  A user who was never
+        # followed (no followed_at) gets no interaction features at all
+        # (the conservative empty set).
+        followed_at = db.get_followed_at(username)
+        interactions = (
+            db.user_interactions_before(username, followed_at)
+            if followed_at else []
+        )
+        discovered_from = db.get_discovered_from(username)
+
         vec, names = build_feature_vector_for_training(
             profile_json, repo_agg, user_langs, user_topics,
             top_langs, top_topics,
+            interactions=interactions, discovered_from=discovered_from,
         )
 
         if feature_order is None:
