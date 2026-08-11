@@ -1645,6 +1645,13 @@ class Database:
         if not self._table_exists("interactions"):
             return False
         seen_at = seen_at or datetime.now(timezone.utc).isoformat()
+        # Normalise the REAL event timestamp to the same ISO format the rest
+        # of the DB uses (``...+00:00`` instead of GitHub's ``...Z``).  The
+        # as-of ML queries string-compare created_at against follow
+        # timestamps, and ``"Z"`` vs ``"+00:00"`` would sort wrongly at the
+        # boundary second ('Z' > '+') — normalising keeps the comparison
+        # exact regardless of which format a caller passes.
+        created_at = (created_at or "").replace("Z", "+00:00")
         cur = self.conn.execute(
             """
             INSERT OR IGNORE INTO interactions
@@ -1661,13 +1668,15 @@ class Database:
 
         Used by the ML feature extractor: features must come only from
         interactions that happened BEFORE the follow timestamp — anything
-        after the follow would leak the label.
+        after the follow would leak the label.  Strictly ``<`` (created_at
+        is normalised to the same ISO format at insert time, so the string
+        comparison is exact).
         """
         if not self._table_exists("interactions"):
             return []
         rows = self.conn.execute(
             "SELECT username, event_type, repo_full_name, event_id, created_at "
-            "FROM interactions WHERE username = ? AND created_at <= ? "
+            "FROM interactions WHERE username = ? AND created_at < ? "
             "ORDER BY created_at",
             (username, ts),
         ).fetchall()
