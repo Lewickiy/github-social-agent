@@ -216,7 +216,9 @@ export default function OverviewPage() {
           }
         />
         {/* Combined card (issue #15): follows in green, unfollows in red,
-            black slash between, and the shared daily budget on the sub-line. */}
+            black slash between, and the shared daily budget on the sub-line.
+            No accent: the value is fully colored by its own spans and the
+            budget pressure already reads numerically in the sub-line. */}
         <StatCard
           label="Follows/Unfollows"
           value={
@@ -227,9 +229,6 @@ export default function OverviewPage() {
             </span>
           }
           icon={<TrendingUp size={16} />}
-          accent={
-            combinedPct >= 90 ? "danger" : combinedPct >= 70 ? "attention" : "default"
-          }
           sub={`${combinedToday}/${stats.daily_limit} combined`}
         />
         <StatCard
