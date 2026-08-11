@@ -753,17 +753,25 @@ def discovery_stats(db):
     * ``last_run`` — the most recent pass (started/finished at, users
       walked, new users found, requests made, duration), or None when the
       worker has never run (or the migration is not applied).
-    * ``budget_percent`` — the last pass's request count as a share of
-      the hourly budget (the worker runs one pass per hour window).
+    * ``requests_per_hour`` — the last pass's sustained request rate
+      (total requests / pass duration).  A pass can span several hours,
+      so this — not the raw pass total — is the honest comparison
+      against the hourly budget.
+    * ``budget_percent`` — that rate as a share of
+      ``DISCOVERY_RATE_LIMIT_PER_HOUR`` (>100 means the pass ran over
+      budget).
     * ``history`` — the most recent passes, newest first.
     """
     runs = db.discovery_runs(limit=20)
     last = runs[0] if runs else None
-    budget_percent = (
-        round(last["requests"] / DISCOVERY_RATE_LIMIT_PER_HOUR * 100, 1)
-        if last and DISCOVERY_RATE_LIMIT_PER_HOUR
-        else 0.0
-    )
+    requests_per_hour = None
+    budget_percent = 0.0
+    if last and last["duration_seconds"] and DISCOVERY_RATE_LIMIT_PER_HOUR:
+        hours = last["duration_seconds"] / 3600
+        requests_per_hour = round(last["requests"] / hours, 1)
+        budget_percent = round(
+            requests_per_hour / DISCOVERY_RATE_LIMIT_PER_HOUR * 100, 1
+        )
     return {
         # The worker_status toggle (default active) is the source of truth
         # — the Management tab pauses/resumes this worker at runtime.
@@ -771,6 +779,7 @@ def discovery_stats(db):
         "rate_limit_per_hour": DISCOVERY_RATE_LIMIT_PER_HOUR,
         "pass_max_users": DISCOVERY_PASS_MAX_USERS,
         "last_run": last,
+        "requests_per_hour": requests_per_hour,
         "budget_percent": budget_percent,
         "history": runs,
     }

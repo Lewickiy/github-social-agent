@@ -9,9 +9,10 @@ quietly adds new users to the queue.
 Rate control: each pass walks at most ``DISCOVERY_PASS_MAX_USERS`` users
 (~1 profile request each, plus one followers request *per page* when
 their count grew), paced to at most ``DISCOVERY_RATE_LIMIT_PER_HOUR``
-requests/hour.  A pass is sized to one hour's budget, so the worker runs
-exactly one pass per hour — and if a pass finishes early it sleeps out
-the rest of the hour, so the hourly budget is never exceeded.
+requests/hour.  The pacing is per user, so a pass can legitimately span
+several hours — the *sustained* request rate, not the pass total, is
+what stays within the hourly budget.  After a pass the worker sleeps out
+the rest of its hour window before starting the next one.
 
 Usage in main.py::
 

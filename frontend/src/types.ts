@@ -295,7 +295,9 @@ export interface DiscoveryState {
   rate_limit_per_hour: number;
   pass_max_users: number;
   last_run: DiscoveryRun | null;
-  /** Requests of the last pass as a % of the hourly budget. */
+  /** Sustained request rate of the last pass (requests/hour). */
+  requests_per_hour: number | null;
+  /** The last pass's request rate as a % of the hourly budget. */
   budget_percent: number;
   history: DiscoveryRun[];
 }
