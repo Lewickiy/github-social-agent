@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useState} from "react";
+import {useCallback, useEffect, useRef, useState} from "react";
 import {
     Activity,
     Bot,
@@ -27,6 +27,25 @@ export default function ManagementPage() {
     const [settings, setSettings] = useState<Settings | null>(null);
     const [tzSaving, setTzSaving] = useState(false);
     const [tzNotice, setTzNotice] = useState<string | null>(null);
+    // ML follow gate — local drafts so the slider stays smooth while
+    // dragging (the server value only catches up after the PUT + poll).
+    const [mlGateOn, setMlGateOn] = useState(true);
+    const [mlThreshold, setMlThreshold] = useState(0.5);
+    const [mlSaving, setMlSaving] = useState(false);
+    const [mlNotice, setMlNotice] = useState<string | null>(null);
+    const mlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => {
+        if (!config) return;
+        setMlGateOn(config.ml_follow_gate_enabled);
+        setMlThreshold(config.ml_follow_threshold);
+    }, [config]);
+
+    useEffect(() => {
+        return () => {
+            if (mlSaveTimer.current) clearTimeout(mlSaveTimer.current);
+        };
+    }, []);
 
     const load = useCallback(async () => {
         try {
@@ -43,6 +62,42 @@ export default function ManagementPage() {
             setError((e as Error).message);
         }
     }, []);
+
+    const saveMLFollow = useCallback(
+        async (cfg: { enabled?: boolean; threshold?: number }) => {
+            setMlSaving(true);
+            setMlNotice(null);
+            try {
+                await api.saveMLFollowConfig(cfg);
+                await load();
+                if (cfg.threshold !== undefined) {
+                    setMlNotice(
+                        `Threshold ${cfg.threshold.toFixed(2)} saved — predictions are being recomputed in the background.`
+                    );
+                } else if (cfg.enabled !== undefined) {
+                    setMlNotice(
+                        `ML follow gate ${cfg.enabled ? "enabled" : "disabled"} — the FollowWorker picks it up on its next cycle.`
+                    );
+                }
+            } catch (e) {
+                setError((e as Error).message);
+            } finally {
+                setMlSaving(false);
+            }
+        },
+        [load]
+    );
+
+    const onMLThresholdChange = (value: number) => {
+        setMlThreshold(value);
+        // Debounce the PUT — dragging fires many onChange events, and the
+        // API only triggers the (seconds-long) prediction recompute when
+        // the stored value actually changes.
+        if (mlSaveTimer.current) clearTimeout(mlSaveTimer.current);
+        mlSaveTimer.current = setTimeout(() => {
+            saveMLFollow({threshold: value});
+        }, 400);
+    };
 
     useEffect(() => {
         load();
@@ -301,7 +356,12 @@ export default function ManagementPage() {
                             <Row label="Account" value={`@${config.my_username}`} mono/>
                             <Row
                                 label="Daily follow limit"
-                                value={String(config.daily_follow_limit)}
+                                value={`${String(config.daily_follow_limit)} (follows + unfollows)`}
+                                mono
+                            />
+                            <Row
+                                label="Unfollow after"
+                                value={`${config.unfollow_after_days}d no interaction`}
                                 mono
                             />
                             <Row
@@ -359,9 +419,74 @@ export default function ManagementPage() {
                         </div>
                     )}
 
+                    {/* ML follow gate — the "strictness" dial */}
+                    {config && (
+                        <div className="mt-3 pt-3 border-t border-border-muted/60">
+                            <div className="flex items-center gap-2">
+                                <span className="text-[13px] font-medium">
+                                    ML follow gate
+                                </span>
+                                <Switch
+                                    checked={mlGateOn}
+                                    disabled={mlSaving}
+                                    label="Toggle ML follow gate"
+                                    onChange={(v) => {
+                                        setMlGateOn(v);
+                                        saveMLFollow({enabled: v});
+                                    }}
+                                />
+                                <span
+                                    className={`ml-auto badge border ${
+                                        mlGateOn
+                                            ? "bg-success-subtle text-success-fg border-success/30"
+                                            : "bg-canvas-subtle text-fg-muted border-border"
+                                    }`}
+                                >
+                                    {mlGateOn ? "On" : "Off"}
+                                </span>
+                            </div>
+                            <p className="text-[12px] text-fg-muted mt-1.5 leading-snug">
+                                When on, the FollowWorker subscribes only to candidates
+                                whose ML followback confidence is at or above the
+                                threshold — a second opinion on top of the score.
+                                Higher = fewer, more selective follows (and a better
+                                follow-back rate).
+                            </p>
+                            <div className="flex items-center gap-3 mt-2.5">
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={0.9}
+                                    step={0.05}
+                                    value={mlThreshold}
+                                    disabled={!mlGateOn || mlSaving}
+                                    onChange={(e) =>
+                                        onMLThresholdChange(Number(e.target.value))
+                                    }
+                                    className="flex-1 h-2 rounded-full bg-border-muted accent-accent cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                    aria-label="ML follow threshold"
+                                />
+                                <span className="font-mono text-[13px] w-12 text-right">
+                                    {mlThreshold.toFixed(2)}
+                                </span>
+                            </div>
+                            <div className="flex justify-between text-[10px] text-fg-subtle mt-0.5">
+                                <span>0.10 permissive</span>
+                                <span>0.50 current rule</span>
+                                <span>0.90 strict</span>
+                            </div>
+                            {mlNotice && (
+                                <p className="mt-1.5 text-[11px] text-success-fg">
+                                    {mlNotice}
+                                </p>
+                            )}
+                        </div>
+                    )}
+
                     <p className="mt-3 text-[12px] text-fg-subtle">
-                        Values come from <code className="font-mono">config.py</code> /
-                        <code className="font-mono">.env</code>.
+                        Static values come from <code className="font-mono">config.py</code> /
+                        <code className="font-mono">.env</code>; the ML gate is stored in the
+                        database and applies without a restart.
                     </p>
                 </div>
 
@@ -441,7 +566,7 @@ export default function ManagementPage() {
                 </div>
                 <p className="text-[12px] text-fg-muted mb-3">
                     Calm background worker that walks the follower graph at a constant
-                    rate to grow the network — one bounded pass per hour window, so it
+                    rate to grow the network — one bounded pass at a time, so it
                     never interferes with silent-mode processing. Its pause/resume
                     toggle lives in the Workers panel above.
                 </p>
@@ -460,15 +585,17 @@ export default function ManagementPage() {
                     </div>
                 ) : (
                     <>
-                        {/* Hourly budget usage of the last pass */}
+                        {/* Request rate of the last pass vs the hourly budget */}
                         <div className="mb-3">
                             <div className="flex items-center justify-between text-[12px] mb-1">
                                 <span className="text-fg-muted">
-                                    Hourly budget used (last pass)
+                                    Request rate vs hourly budget (last pass)
                                 </span>
                                 <span className="font-mono">
-                                    {discovery.last_run.requests ?? 0} /{" "}
-                                    {discovery.rate_limit_per_hour} req ·{" "}
+                                    {discovery.requests_per_hour != null
+                                        ? discovery.requests_per_hour
+                                        : "—"}{" "}
+                                    / {discovery.rate_limit_per_hour} req/h ·{" "}
                                     <span className="text-fg-subtle">
                                         {discovery.budget_percent}%
                                     </span>
@@ -477,9 +604,9 @@ export default function ManagementPage() {
                             <div className="h-2 rounded-full bg-border-muted overflow-hidden">
                                 <div
                                     className={`h-full rounded-full transition-all ${
-                                        discovery.budget_percent > 90
+                                        discovery.budget_percent > 100
                                             ? "bg-danger"
-                                            : discovery.budget_percent > 70
+                                            : discovery.budget_percent > 85
                                               ? "bg-attention"
                                               : "bg-success"
                                     }`}

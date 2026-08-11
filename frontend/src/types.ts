@@ -149,6 +149,10 @@ export interface Config {
   current_score_version: number;
   ml_enabled: boolean;
   ml_train_interval_hours: number;
+  /** Master switch for the ML follow gate (FollowWorker consults predictions). */
+  ml_follow_gate_enabled: boolean;
+  /** FollowWorker only follows candidates whose ML confidence >= this value. */
+  ml_follow_threshold: number;
   repo_freshness_days: number;
   owner_sync_days: number;
   score_freshness_days: number;

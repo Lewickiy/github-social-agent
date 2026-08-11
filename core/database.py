@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from core.config import (
     DATABASE,
     CURRENT_SCORE_VERSION,
+    ML_FOLLOW_GATE_ENABLED,
+    ML_FOLLOW_THRESHOLD,
     REPO_FRESHNESS_DAYS,
     SCORE_FRESHNESS_DAYS,
     SILENT_REPO_CHECK_FRESHNESS_DAYS,
@@ -1687,6 +1689,50 @@ class Database:
             (prediction, username),
         )
         self.conn.commit()
+
+    def ml_prediction(self, username):
+        """Return the stored ML prediction (0 or 1) for *username*, or None."""
+        row = self.conn.execute(
+            "SELECT ml_follow_prediction FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else None
+
+    # --------------------------------------------------
+    # ML follow gate — runtime "strictness" settings
+    # --------------------------------------------------
+    # The gate is controlled from the Management tab (no restart): the
+    # master switch and the decision threshold live in the settings table,
+    # seeded by the ML_FOLLOW_* config defaults on a fresh install.
+
+    def get_ml_follow_threshold(self):
+        """Effective ML follow threshold (0–1), from settings or config."""
+        raw = self.get_setting("ml_follow_threshold")
+        if raw is None:
+            return ML_FOLLOW_THRESHOLD
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return ML_FOLLOW_THRESHOLD
+
+    def get_ml_follow_gate_enabled(self):
+        """True when the FollowWorker's ML gate is on (settings or config)."""
+        raw = self.get_setting("ml_follow_gate_enabled")
+        if raw is None:
+            return ML_FOLLOW_GATE_ENABLED
+        return str(raw).lower() in ("1", "true", "yes")
+
+    def set_ml_follow_config(self, gate_enabled=None, threshold=None):
+        """Persist the Management-tab gate switch / threshold.
+
+        Accepts None for either field (only the given one is written).
+        Stored as strings (settings is a key/value text table).
+        """
+        if gate_enabled is not None:
+            self.set_setting("ml_follow_gate_enabled", "1" if gate_enabled else "0")
+        if threshold is not None:
+            self.set_setting("ml_follow_threshold", str(round(float(threshold), 4)))
+
 
     # --------------------------------------------------
     # ML training-run history (dashboard ML tab)

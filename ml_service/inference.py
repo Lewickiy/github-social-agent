@@ -88,7 +88,10 @@ def predict_single(model, metadata, db, username):
         )
 
         tensor = torch.tensor([vec], dtype=torch.float32)
-        pred = int(model.predict(tensor).item())
+        # The stored 0/1 reflects the runtime ML follow threshold (the
+        # Management-tab "strictness" dial) — see config.ML_FOLLOW_THRESHOLD.
+        threshold = db.get_ml_follow_threshold()
+        pred = int(model.predict(tensor, threshold=threshold).item())
         db.save_ml_prediction(username, pred)
         return pred
     except Exception:

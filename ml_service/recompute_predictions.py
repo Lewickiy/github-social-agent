@@ -113,6 +113,11 @@ def recompute_all_predictions(db, batch=DEFAULT_BATCH, limit=None, verbose=False
     top_topics = [(name, 0) for name in metadata["top_topics"]]
     feature_order = metadata["feature_order"]
 
+    # The stored 0/1 must reflect the *current* ML follow threshold (the
+    # Management-tab strictness dial), so the FollowWorker gate and the
+    # dashboard "ML candidates" stat stay consistent with it.
+    threshold = db.get_ml_follow_threshold()
+
     model.eval()
     pred_1 = 0
     pred_0 = 0
@@ -132,7 +137,7 @@ def recompute_all_predictions(db, batch=DEFAULT_BATCH, limit=None, verbose=False
                 top_langs, top_topics, feature_order,
             )
             tensor = torch.tensor([vec], dtype=torch.float32)
-            pred = int(model.predict(tensor).item())
+            pred = int(model.predict(tensor, threshold=threshold).item())
             updates.append((pred, username))
 
             if pred == 1:

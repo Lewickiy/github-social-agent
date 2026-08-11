@@ -272,6 +272,29 @@ ML_TRAIN_AFTER_START = True        # train immediately after worker starts
 ML_TRAIN_INTERVAL_HOURS = 24       # re-train every N hours
 ML_MODEL_DIR = "models"            # directory for saved model files
 
+# ── ML follow gate (the "strictness" dial) ──────────────────────────────
+# The FollowWorker normally follows every NEW candidate whose heuristic
+# score passes SILENT_FOLLOW_SCORE_THRESHOLD.  The ML follow gate makes
+# the model a second opinion: when enabled, a candidate whose stored
+# followback prediction is 0 (model confidence < threshold) is skipped,
+# so the daily budget goes to users the model believes will reciprocate.
+#
+#   * ``ML_FOLLOW_GATE_ENABLED`` — master switch for the gate.  These
+#     constants only seed the *fresh-install* defaults; at runtime both
+#     values live in the settings table (keys ``ml_follow_gate_enabled`` /
+#     ``ml_follow_threshold``) and are editable from the Management tab
+#     without a restart.
+#   * ``ML_FOLLOW_THRESHOLD`` — the model's followback probability a
+#     candidate must reach to be followed (0.5 = current decision rule;
+#     higher = fewer, more selective follows).  Predictions are stored
+#     with the threshold applied (ml_follow_prediction = 0/1), and a
+#     background recompute refreshes them whenever the threshold changes.
+#   * Candidates with no prediction yet (NULL — scored before ML existed
+#     or inference failed) are NOT vetoed: the gate only blocks a
+#     definitive 0, so the queue keeps flowing.
+ML_FOLLOW_GATE_ENABLED = True
+ML_FOLLOW_THRESHOLD = 0.5
+
 # Feature dimensionality.  Kept deliberately small: with a tiny training
 # set (a few hundred labeled users) every extra multi-hot dimension is
 # almost always 0 and only adds noise.  10 languages + 15 topics yield

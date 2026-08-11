@@ -78,6 +78,12 @@ _COOLDOWN_SECONDS = 2 * 60 * 60
 # API.  Real subscriptions are paced by the 20–30 min interval instead.
 _ALREADY_DELAY_SECONDS = 3
 
+# Pause after an ML-gate veto.  Vetoes are pure DB reads (no API cost),
+# but a queue with many pred-0 candidates must not spin a tight loop of
+# SQLite queries — one short pause per skip keeps the drain calm, same
+# spirit as the "already" path above.
+_GATE_DELAY_SECONDS = 1
+
 
 class FollowWorker(threading.Thread):
     """Daemon thread that subscribes to the best scored candidates.
@@ -103,6 +109,10 @@ class FollowWorker(threading.Thread):
         self._threshold = threshold
         self._poll_interval = poll_interval
         self._rate_limit_streak = 0
+        # Candidates vetoed by the ML gate in the current drain — logged
+        # as one summary line when the drain ends, so the gate's effect is
+        # visible in the logs without spamming one line per skip.
+        self._gate_skips = 0
 
     # ------------------------------------------------------------------
     # Main loop
@@ -141,6 +151,13 @@ class FollowWorker(threading.Thread):
                     log.exception("Follow worker error")
                     outcome = "empty"
 
+                if self._gate_skips:
+                    log.info(
+                        "Follow worker: skipped %d candidate(s) via the ML follow "
+                        "gate this drain (prediction below threshold).",
+                        self._gate_skips,
+                    )
+
                 if self._shutdown.is_set():
                     break
 
@@ -177,6 +194,7 @@ class FollowWorker(threading.Thread):
         budget is spent, ``"empty"`` when the queue simply ran dry (no
         scored candidates yet), ``"stopped"`` on shutdown / errors.
         """
+        self._gate_skips = 0
         while not self._shutdown.is_set():
             # Toggled off mid-drain — stop following and let run() pause.
             if not is_enabled(db, WORKER_KEY):
@@ -199,6 +217,25 @@ class FollowWorker(threading.Thread):
                     "Follow worker: %s was marked DELETED meanwhile — "
                     "moving to the next candidate", username,
                 )
+                continue
+
+            # ML follow gate — the model is a second opinion on top of the
+            # score.  When enabled, a stored prediction of 0 (followback
+            # confidence below the runtime threshold from the Management
+            # tab) vetoes the candidate, so the daily budget goes to users
+            # the model believes will reciprocate.  NULL (no prediction
+            # yet — scored before ML existed or inference failed) is NOT a
+            # veto: only a definitive 0 blocks, so the queue keeps flowing.
+            if db.get_ml_follow_gate_enabled() and db.ml_prediction(username) == 0:
+                self._gate_skips += 1
+                log.debug(
+                    "Follow worker: %s vetoed by ML gate (prediction 0) — "
+                    "moving to the next candidate", username,
+                )
+                # Brief pause so a pred-0-heavy queue doesn't spin the DB
+                # in a tight loop (see _GATE_DELAY_SECONDS).
+                if not self._sleep(_GATE_DELAY_SECONDS):
+                    return "stopped"
                 continue
 
             outcome = self._follow_user(db, github, username, score)

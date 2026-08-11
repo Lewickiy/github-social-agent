@@ -46,9 +46,12 @@ from api.queries import (
 )
 from core.config import DAILY_FOLLOW_LIMIT
 from core.database import Database
+from core.logger import get_logger
 from core.tz import DEFAULT_TIMEZONE, get_timezone_name, set_timezone, utc_offset_minutes
 from workers.registry import WORKERS
 from workers.runtime import ALIVE_WINDOW_SECONDS
+
+log = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -506,21 +509,126 @@ def settings_update(payload: SettingsUpdate):
 def config_view():
     import core.config as cfg
 
+    # The ML follow gate is runtime-tunable (settings table), so its
+    # effective values come from the DB, not the config module.
+    db = _db()
+    try:
+        ml_follow_gate_enabled = db.get_ml_follow_gate_enabled()
+        ml_follow_threshold = db.get_ml_follow_threshold()
+    finally:
+        db.conn.close()
+
     return {
         "my_username": cfg.MY_USERNAME,
         "daily_follow_limit": cfg.DAILY_FOLLOW_LIMIT,
+        "unfollow_after_days": cfg.UNFOLLOW_AFTER_DAYS,
         "follow_interval_min_seconds": cfg.FOLLOW_INTERVAL_MIN_SECONDS,
         "follow_interval_max_seconds": cfg.FOLLOW_INTERVAL_MAX_SECONDS,
         "score_threshold": cfg.SILENT_FOLLOW_SCORE_THRESHOLD,
         "current_score_version": cfg.CURRENT_SCORE_VERSION,
         "ml_enabled": cfg.ML_ENABLED,
         "ml_train_interval_hours": cfg.ML_TRAIN_INTERVAL_HOURS,
+        "ml_follow_gate_enabled": ml_follow_gate_enabled,
+        "ml_follow_threshold": ml_follow_threshold,
         "repo_freshness_days": cfg.REPO_FRESHNESS_DAYS,
         "owner_sync_days": cfg.OWNER_SYNC_DAYS,
         "score_freshness_days": cfg.SCORE_FRESHNESS_DAYS,
         "follower_scan_days": cfg.FOLLOWER_SCAN_DAYS,
         "prioritize_small": cfg.SILENT_PRIORITIZE_SMALL,
     }
+
+
+# ── ML follow gate (Management tab "strictness" dial) ────────────────────
+
+class MLFollowConfig(BaseModel):
+    enabled: bool | None = None
+    threshold: float | None = None
+
+
+_ml_recompute_lock = threading.Lock()
+_ml_recompute_thread: threading.Thread | None = None
+
+
+def _ml_follow_config_view(db):
+    """Effective gate values (settings-backed), for API responses."""
+    return {
+        "enabled": db.get_ml_follow_gate_enabled(),
+        "threshold": db.get_ml_follow_threshold(),
+    }
+
+
+def _kick_ml_recompute():
+    """Recompute all stored predictions in a background thread.
+
+    Called when the threshold changes so the FollowWorker gate and the
+    dashboard stat immediately reflect the new strictness (the recompute
+    is purely local — no GitHub API — and takes a few seconds for the
+    current population).  At most one recompute runs at a time.
+    """
+    global _ml_recompute_thread
+    with _ml_recompute_lock:
+        if (
+            _ml_recompute_thread is not None
+            and _ml_recompute_thread.is_alive()
+        ):
+            return
+
+        def _run():
+            from ml_service.recompute_predictions import recompute_all_predictions
+
+            rdb = Database()
+            try:
+                stats = recompute_all_predictions(rdb)
+                log.info(
+                    "ML recompute (threshold change): %d users — %d×1 / %d×0.",
+                    stats.get("total"), stats.get("pred_1"), stats.get("pred_0"),
+                )
+            except Exception:
+                log.exception("ML recompute (threshold change) failed")
+            finally:
+                rdb.conn.close()
+
+        _ml_recompute_thread = threading.Thread(
+            target=_run, daemon=True, name="MLRecomputeOnConfig",
+        )
+        _ml_recompute_thread.start()
+
+
+@app.put("/api/config/ml-follow")
+def ml_follow_config_set(payload: MLFollowConfig):
+    """Update the ML follow gate (switch / threshold).
+
+    Persists to settings — the FollowWorker picks both up on its next
+    cycle without a restart.  Changing the threshold also triggers a
+    background recompute of every stored prediction, so the gate and the
+    dashboard's "ML candidates" stat switch over immediately.
+
+    The recompute is best-effort: it is skipped when one is already
+    running (the bot process may be recomputing after a daily retrain).
+    In that case labels converge at the next scoring pass or retrain —
+    the FollowWorker never acts on a value older than the last recompute.
+    """
+    db = _db()
+    threshold_changed = False
+    try:
+        if payload.threshold is not None:
+            if not 0.0 <= payload.threshold <= 1.0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="ml_follow_threshold must be between 0 and 1.",
+                )
+            if abs(db.get_ml_follow_threshold() - payload.threshold) > 1e-6:
+                threshold_changed = True
+            db.set_ml_follow_config(threshold=payload.threshold)
+        if payload.enabled is not None:
+            db.set_ml_follow_config(gate_enabled=payload.enabled)
+        result = _ml_follow_config_view(db)
+    finally:
+        db.conn.close()
+
+    if threshold_changed:
+        _kick_ml_recompute()
+    return result
 
 
 # ── Worker control (background threads, dashboard Management tab) ─────────

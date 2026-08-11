@@ -53,11 +53,17 @@ class FollowbackPredictor(nn.Module):
         """Returns probability (0-1) of mutual follow."""
         return self.net(x)
 
-    def predict(self, x):
-        """Returns binary prediction: 0 or 1."""
+    def predict(self, x, threshold=0.5):
+        """Returns binary prediction: 0 or 1.
+
+        *threshold* is the decision line on the followback probability
+        (default 0.5 — the classic decision rule).  Callers pass the
+        runtime ML follow threshold (Management-tab dial) so the stored
+        0/1 prediction always reflects the current strictness.
+        """
         with torch.no_grad():
             prob = self.forward(x)
-            return (prob >= 0.5).int().squeeze(-1)
+            return (prob >= threshold).int().squeeze(-1)
 
     def predict_proba(self, x):
         """Returns probability (0-1) without gradient tracking."""

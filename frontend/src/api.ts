@@ -66,6 +66,9 @@ export const api = {
   config: () => get<Config>("/config"),
   settings: () => get<Settings>("/settings"),
   saveSettings: (timezone: string) => put<Settings>("/settings", { timezone }),
+  /** Toggle / tune the ML follow gate (applies immediately, no restart). */
+  saveMLFollowConfig: (cfg: { enabled?: boolean; threshold?: number }) =>
+    put<{ enabled: boolean; threshold: number }>("/config/ml-follow", cfg),
   workers: () => get<WorkersResponse>("/workers"),
   setWorkerEnabled: (key: string, enabled: boolean) =>
     put<WorkerStatus>(`/workers/${encodeURIComponent(key)}`, { enabled }),
