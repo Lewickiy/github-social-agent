@@ -17,13 +17,15 @@ export const STATUS_META: Record<
     cls: "bg-success-subtle text-success-fg border border-success/30",
     dot: "bg-success",
   },
+  // The two unfollow categories describe OPPOSITE directions, so the
+  // labels state the direction explicitly (see issue #13).
   UNFOLLOWED_AFTER_MUTUAL_FOLLOW: {
-    label: "Unfollowed",
+    label: "They unfollowed us",
     cls: "bg-danger-subtle text-danger-fg border border-danger/30",
     dot: "bg-danger",
   },
   UNFOLLOWED_NO_INTERACTION: {
-    label: "Unfollowed (no interaction)",
+    label: "We unfollowed (no interaction)",
     cls: "bg-attention-subtle text-attention border border-attention/30",
     dot: "bg-attention",
   },
@@ -57,11 +59,11 @@ export const ACTION_META: Record<string, ActionMeta> = {
     cls: "bg-success-subtle text-success-fg border border-success/30",
   },
   UNFOLLOWED: {
-    label: "Unfollowed",
+    label: "They unfollowed us",
     cls: "bg-danger-subtle text-danger-fg border border-danger/30",
   },
   UNFOLLOW: {
-    label: "Unfollowed (no interaction)",
+    label: "We unfollowed (no interaction)",
     cls: "bg-attention-subtle text-attention border border-attention/30",
   },
   DELETED: {
