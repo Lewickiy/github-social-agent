@@ -94,6 +94,18 @@ export function StatusBars({ data }: { data: StatusCount[] }) {
     .filter((entry) => entry.count > 0)
     .sort((a, b) => b.count - a.count);
 
+  if (ordered.length === 0) {
+    // Every category is zero in this window — the bars are hidden by
+    // design (issue #14); show a quiet hint instead of a bare grid.
+    return (
+      <div className="h-[200px] w-full flex items-center justify-center">
+        <span className="text-[13px] text-fg-subtle">
+          No status transitions in this period
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className="h-[200px] w-full">
       <ResponsiveContainer width="100%" height="100%">
