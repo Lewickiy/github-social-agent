@@ -39,6 +39,7 @@ from workers.follow_worker import FollowWorker
 from workers.followback_check_worker import FollowbackCheckWorker
 from workers.graph_discovery_worker import GraphDiscoveryWorker
 from workers.ml_trainer import MLTrainerWorker
+from workers.reciprocal_worker import ReciprocalWorker
 from workers.snapshot_worker import SnapshotWorker, take_snapshot_now
 from workers.unfollow_worker import UnfollowWorker
 
@@ -213,6 +214,7 @@ def main():
     follow_worker = None
     unfollow_worker = None
     ml_worker = None
+    reciprocal_worker = None
     snapshot_worker = None
     if long_running & set(sys.argv):
         # All background workers start unconditionally — whether each one
@@ -245,6 +247,12 @@ def main():
         unfollow_worker.start()
         ml_worker = MLTrainerWorker(_shutdown)
         ml_worker.start()
+        # Answers attention with attention: follows new interactors and
+        # stars their most relevant repository, paced like follows within
+        # the shared daily budget.  Deliberately OPTIONAL (issue #24) —
+        # toggled from the Management tab like every other worker.
+        reciprocal_worker = ReciprocalWorker(_shutdown)
+        reciprocal_worker.start()
         snapshot_worker = SnapshotWorker(_shutdown)
         snapshot_worker.start()
 
