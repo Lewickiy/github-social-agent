@@ -793,8 +793,9 @@ def discovery_stats(db):
 #   * GREEN  — last N runs ALL >= 0.65 CV AUC, >= 1000 training samples and
 #              >= 200 positives: the model is stable above random with a
 #              healthy dataset — worth discussing features/labels or the gate.
-#   * YELLOW — average of the last N runs >= 0.60 and >= 700 samples: quality
-#              is climbing, keep training in shadow and re-check later.
+#   * YELLOW — full window of N runs available, average of the last N
+#              runs >= 0.60 and >= 700 samples: quality is climbing, keep
+#              training in shadow and re-check later.
 #   * RED    — otherwise: the dataset (especially the positive class) is the
 #              bottleneck — wait and let labels accumulate.
 _ML_TREND_WINDOW = 3
@@ -855,7 +856,11 @@ def _ml_trend(history, samples, positives):
             "dataset — it's worth discussing new features, better labels or "
             "re-enabling the follow gate."
         )
-    elif avg_cv >= _ML_TREND_YELLOW_MIN_AVG_CV_AUC and samples >= _ML_TREND_YELLOW_MIN_SAMPLES:
+    elif (
+        len(window) >= _ML_TREND_WINDOW
+        and avg_cv >= _ML_TREND_YELLOW_MIN_AVG_CV_AUC
+        and samples >= _ML_TREND_YELLOW_MIN_SAMPLES
+    ):
         level, label, verdict = "yellow", "On track", (
             "Quality is climbing but the dataset is still small — keep "
             "training in shadow and re-check after a few more retrains."
