@@ -362,14 +362,9 @@ export default function OverviewPage() {
         <div className="card p-4 min-w-0">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-[14px] font-semibold">Interactions</h2>
-            <a
-              href="https://github.com/notifications"
-              target="_blank"
-              rel="noreferrer"
-              className="text-[12px] text-accent hover:underline"
-            >
-              View on GitHub →
-            </a>
+            <span className="text-[12px] text-fg-subtle">
+              stars · forks · issues · PRs
+            </span>
           </div>
           <div className="divide-y divide-border-muted">
             {stats.interactions.length === 0 && (
