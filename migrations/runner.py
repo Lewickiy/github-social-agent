@@ -4,12 +4,18 @@ Usage:
     python -m migrations.runner         # apply all pending migrations
     python -m migrations.runner --status    # show applied / pending migrations
     python -m migrations.runner --rollback  # undo the last migration
+
+The runner is safe to call at application startup (bot + dashboard do
+this automatically): a per-database lock file serializes concurrent
+migrators, so two containers booting together can never both try to
+apply the same migration.
 """
 
 import os
 import sys
 import sqlite3
 import importlib.util
+import contextlib
 
 from core.config import DATABASE
 
@@ -67,6 +73,40 @@ def _remove_record(conn, name):
     conn.commit()
 
 
+@contextlib.contextmanager
+def _migration_lock(db_path):
+    """Serialize migrators across processes sharing one SQLite database.
+
+    The bot and dashboard containers both auto-migrate on startup and may
+    boot at the same instant.  A naive migrator would race: both would
+    read the same "pending" list, and the loser would crash on
+    ``CREATE TABLE``/``UNIQUE`` conflicts.  ``flock`` on a lock file next
+    to the DB (both containers bind-mount the same ``./data`` directory,
+    so the lock is shared) makes the second migrator wait, then see the
+    migrations the first one already recorded and do nothing.
+
+    Falls back to a no-op on platforms without ``fcntl`` (e.g. Windows).
+
+    Note: ``flock`` blocks until the lock is released (no timeout) — fine
+    here because a migrate pass is short.  The lock file itself (``<db>.migrate.lock``)
+    stays behind as a harmless 0-byte file next to the DB.
+    """
+    lock_path = db_path + ".migrate.lock"
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+
+    with open(lock_path, "w") as lockf:
+        if fcntl is not None:
+            fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+
+
 # ------------------------------------------------------------------
 # Public API
 # ------------------------------------------------------------------
@@ -89,60 +129,68 @@ def status(path=None):
 
 
 def migrate(path=None):
-    conn = sqlite3.connect(path or DATABASE)
-    _ensure_migrations_table(conn)
+    db_path = path or DATABASE
+    # Serialize concurrent migrators (bot + dashboard boot together).
+    with _migration_lock(db_path):
+        conn = sqlite3.connect(db_path, timeout=30)
+        try:
+            _ensure_migrations_table(conn)
 
-    # Journal mode: WAL for parallel access (Docker container +
-    # PyCharm/DBeaver). SAFE now: the DB lives in data/github_social.db and
-    # the Docker container mounts the whole ./data dir as /app/data, so WAL
-    # and SHM files are created NEXT TO the DB file on the host — one shared
-    # filesystem location for the container, host scripts and IDE tools.
-    # (Previously WAL was forced while `./logs:/app/data` shadowed the DB
-    # path, splitting WAL/SHM into ./logs and corrupting the database.)
-    conn.execute("PRAGMA journal_mode=WAL;")
+            # Journal mode: WAL for parallel access (Docker container +
+            # PyCharm/DBeaver). SAFE now: the DB lives in data/github_social.db
+            # and the Docker container mounts the whole ./data dir as
+            # /app/data, so WAL and SHM files are created NEXT TO the DB file
+            # on the host — one shared filesystem location for the container,
+            # host scripts and IDE tools. (Previously WAL was forced while
+            # `./logs:/app/data` shadowed the DB path, splitting WAL/SHM into
+            # ./logs and corrupting the database.)
+            conn.execute("PRAGMA journal_mode=WAL;")
 
-    applied = _applied_names(conn)
-    files = _migration_files()
+            applied = _applied_names(conn)
+            files = _migration_files()
 
-    pending = [f for f in files if f not in applied]
+            pending = [f for f in files if f not in applied]
 
-    if not pending:
-        print("Nothing to migrate.")
-        conn.close()
-        return
+            if not pending:
+                print("Nothing to migrate.")
+                return
 
-    for f in pending:
-        mod_path = os.path.join(MIGRATIONS_DIR, f)
-        mod = _load_module(mod_path)
+            for f in pending:
+                mod_path = os.path.join(MIGRATIONS_DIR, f)
+                mod = _load_module(mod_path)
 
-        print(f"Applying {f} ...")
-        mod.up(conn)
-        _record(conn, f)
-        print(f"  done.")
-
-    conn.close()
+                print(f"Applying {f} ...")
+                mod.up(conn)
+                _record(conn, f)
+                print(f"  done.")
+        finally:
+            conn.close()
 
 
 def rollback(path=None):
-    conn = sqlite3.connect(path or DATABASE)
-    _ensure_migrations_table(conn)
+    db_path = path or DATABASE
+    # Same lock as migrate(): a manual rollback must never interleave with
+    # an auto-migrate from a concurrently booting container.
+    with _migration_lock(db_path):
+        conn = sqlite3.connect(db_path, timeout=30)
+        try:
+            _ensure_migrations_table(conn)
 
-    applied = _applied_names(conn)
-    if not applied:
-        print("Nothing to rollback.")
-        conn.close()
-        return
+            applied = _applied_names(conn)
+            if not applied:
+                print("Nothing to rollback.")
+                return
 
-    last = sorted(applied)[-1]
-    mod_path = os.path.join(MIGRATIONS_DIR, last)
-    mod = _load_module(mod_path)
+            last = sorted(applied)[-1]
+            mod_path = os.path.join(MIGRATIONS_DIR, last)
+            mod = _load_module(mod_path)
 
-    print(f"Rolling back {last} ...")
-    mod.down(conn)
-    _remove_record(conn, last)
-    print("  done.")
-
-    conn.close()
+            print(f"Rolling back {last} ...")
+            mod.down(conn)
+            _remove_record(conn, last)
+            print("  done.")
+        finally:
+            conn.close()
 
 
 # ------------------------------------------------------------------

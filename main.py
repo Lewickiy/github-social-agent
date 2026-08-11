@@ -182,7 +182,23 @@ def main():
     # the bot can record the true outcome on exit (survives API restarts).
     job_id = os.environ.get("GITHUB_SOCIAL_JOB_ID")
 
-    # Ensure migrations have been applied before any DB operation
+    # Apply pending database migrations automatically at startup, so a
+    # container self-migrates on boot (no manual `python main.py --migrate`
+    # needed after pulling new code).  Explicit migration commands and
+    # --help keep their manual behaviour (--migrate applies, --migrate-status
+    # shows the real pending list, --help must not touch the DB).  The runner
+    # is lock-serialized, so the dashboard container auto-migrating at the
+    # same moment is safe.
+    if not ({"--migrate", "--migrate-status", "--help"} & set(sys.argv)):
+        try:
+            from migrations.runner import migrate
+            migrate()
+        except Exception as exc:
+            log.error("Automatic migration failed: %s", exc)
+            print(f"Error: automatic migration failed: {exc}")
+            sys.exit(1)
+
+    # Ensure the database is initialised before any DB operation
     if "--migrate" not in sys.argv and "--migrate-status" not in sys.argv and "--help" not in sys.argv:
         try:
             db = Database()
