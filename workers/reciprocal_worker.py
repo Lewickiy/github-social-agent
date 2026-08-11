@@ -151,7 +151,10 @@ class ReciprocalWorker(threading.Thread):
                         db=db, key=WORKER_KEY,
                     ):
                         break
-                else:
+                elif outcome != "done":
+                    # "done" already slept the 20–30 min reciprocal pause
+                    # inside _drain_one — only idle/empty cycles re-poll
+                    # quickly.
                     if not sleep_interruptible(
                         self._shutdown, self._poll_interval,
                         db=db, key=WORKER_KEY,
@@ -180,9 +183,11 @@ class ReciprocalWorker(threading.Thread):
         touch_heartbeat(db, WORKER_KEY)
 
         # ── 1) Follow back (respects the shared daily budget + lock) ──
+        # The star below runs regardless of the follow budget — stars do
+        # NOT draw from the shared follow+unfollow pool, so a budget
+        # block must not also stall reciprocity via starring.
         follow_outcome = self._follow_interactor(db, github, username)
-        if follow_outcome == "no_budget":
-            return "exhausted"
+        budget_exhausted = follow_outcome == "no_budget"
         if follow_outcome in ("shutdown", "auth_fatal"):
             return "stopped"
         if follow_outcome == "rate_limited":
@@ -205,6 +210,13 @@ class ReciprocalWorker(threading.Thread):
 
         self._rate_limit_streak = 0
         mark_action(db, WORKER_KEY)
+
+        # Budget exhausted: the star was still attempted (it doesn't draw
+        # from the follow pool), but the follow has to wait for midnight —
+        # report "exhausted" so run() sleeps out the rest of the day
+        # instead of re-polling a still-blocked budget every 5 minutes.
+        if budget_exhausted:
+            return "exhausted"
 
         # Random human-like pause between reciprocal actions (20–30 min).
         wait = random.uniform(
@@ -307,9 +319,15 @@ class ReciprocalWorker(threading.Thread):
         Relevance = matching the owner's topics first, then highest stars.
         Our DB is preferred (free); the live API is the fallback (capped
         at ``_MAX_REPO_PAGES`` pages).  Records ``we_starred`` on their
-        interactions when a star actually happened.  Never raises — all
-        GitHub errors are logged and treated as \"no star this cycle\"
-        (the follow-back was already recorded, so the user is answered).
+        interactions when a star actually happened.
+
+        Terminal outcome (no suitable repository — the user has nothing
+        to star) is recorded as ``we_starred`` so the interactor leaves
+        the queue: retrying a star that can never happen every cycle
+        would burn API requests forever (the follow-back is the real
+        signal anyway).  Transient failures (rate limit / network / auth)
+        leave the flag clear so the star is genuinely retried.  Never
+        raises.
         """
         try:
             owner = db.get_owner()
@@ -322,10 +340,13 @@ class ReciprocalWorker(threading.Thread):
             return
 
         if not repo_name:
+            # Terminal: nothing to star.  Record so the user is answered
+            # (the follow-back, when possible, is the real signal anyway).
             log.info(
                 "Reciprocal: no suitable public repository found for %s — "
-                "skipping star (follow already recorded)", username,
+                "recording star as resolved", username,
             )
+            db.mark_user_reciprocal(username, "star")
             return
 
         try:
@@ -359,25 +380,31 @@ class ReciprocalWorker(threading.Thread):
         """Pick the interactor's most relevant repository to star.
 
         Preference: a repository whose topics intersect the owner's topics
-        (niche relevance), otherwise the highest-starred repository.  Our
-        own DB is consulted first (already collected); when the user has
-        no repos collected yet, the live API is fetched (capped pages).
+        (niche relevance), otherwise the highest-starred repository.
+        Forks and archived repositories are never picked (starring a fork
+        of someone else's repo is a weak reciprocal signal).  Our own DB
+        is consulted first (already collected); when the user has no
+        repos collected yet, the live API is fetched (capped pages).
         Returns the repo short name, or None.
         """
         owner_topics = set(db.user_topics(owner)) if owner else set()
 
         # ── DB first: repos already collected for this user ──
         rows = db.conn.execute(
-            "SELECT name, stars FROM repositories WHERE user_id = ? "
+            "SELECT name, stars, is_fork, is_archived "
+            "FROM repositories WHERE user_id = ? "
             "ORDER BY stars DESC",
             (username,),
         ).fetchall()
-        if rows:
-            # Find topic matches among the collected repos.
-            for name, stars in rows:
+        candidates = [
+            r for r in rows if not r[2] and not r[3]
+        ] or rows  # fall back to everything when all are forks/archived
+        if candidates:
+            # Find topic matches among the candidates.
+            for name, stars, _f, _a in candidates:
                 if self._repo_matches_topics(db, name, username, owner_topics):
                     return name
-            return rows[0][0]  # highest stars
+            return candidates[0][0]  # highest stars
 
         # ── Live fallback: fetch their repos (capped) ──
         from core.github_client import _paginate
@@ -394,17 +421,19 @@ class ReciprocalWorker(threading.Thread):
             )
             return None
 
+        candidates = [
+            r for r in repos
+            if r.get("name") and not r.get("fork") and not r.get("archived")
+        ] or repos
+
         # Topic match first, then highest stars.
-        for repo in repos:
+        for repo in candidates:
             repo_topics = set(repo.get("topics") or [])
             if repo_topics & owner_topics:
                 return repo.get("name")
-        if repos:
-            return max(
-                (r for r in repos if r.get("name")),
-                key=lambda r: r.get("stargazers_count", 0),
-            ).get("name")
-        return None
+        return max(
+            candidates, key=lambda r: r.get("stargazers_count", 0),
+        ).get("name") if candidates else None
 
     @staticmethod
     def _repo_matches_topics(db, repo_name, username, owner_topics):
