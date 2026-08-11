@@ -1565,13 +1565,40 @@ class Database:
         """
         if not self._table_exists("discovery_sources"):
             return None
-        self.conn.execute(
+        cur = self.conn.execute(
             "INSERT OR IGNORE INTO discovery_sources (repo_full_name, source_type) "
             "VALUES (?, ?)",
             (repo_full_name, source_type),
         )
         self.conn.commit()
-        return True
+        return cur.rowcount > 0
+
+    def seed_discovery_sources(self, source_types=("stargazers", "contributors")):
+        """Register the owner's own repositories as discovery seeds.
+
+        The seed set is the owner's repository list (already in the
+        ``repositories`` table).  Idempotent — already-registered
+        (repo, source_type) pairs are skipped via ``INSERT OR IGNORE``, so
+        calling this every pass is cheap and keeps the seed list in sync
+        as the owner publishes new repositories.  Returns the number of
+        seed rows newly registered.
+        """
+        if not self._table_exists("discovery_sources"):
+            return 0
+        owner = self.get_owner()
+        if not owner:
+            return 0
+        rows = self.conn.execute(
+            "SELECT name FROM repositories WHERE user_id = ?",
+            (owner,),
+        ).fetchall()
+        added = 0
+        for (name,) in rows:
+            full = f"{owner}/{name}"
+            for st in source_types:
+                if self.add_discovery_source(full, st):
+                    added += 1
+        return added
 
     def get_discovery_sources(self):
         """All discovery_sources rows as dicts (empty pre-migration)."""

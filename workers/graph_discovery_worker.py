@@ -14,6 +14,13 @@ several hours — the *sustained* request rate, not the pass total, is
 what stays within the hourly budget.  After a pass the worker sleeps out
 the rest of its hour window before starting the next one.
 
+Each pass ALSO runs the repo-content discovery pass
+(``Collector._discover_repo_fans``, issue #22): the owner's own
+repositories are mined for stargazers (+ optionally contributors), with
+the same pacing, budget and ``discovery_runs`` reporting as the graph
+walk.  1 request ≈ up to 100 candidates — far more throughput than graph
+walking for the same budget.
+
 Usage in main.py::
 
     from workers.graph_discovery_worker import GraphDiscoveryWorker
@@ -28,6 +35,8 @@ from datetime import datetime, timezone
 from core.config import (
     DISCOVERY_PASS_MAX_USERS,
     DISCOVERY_RATE_LIMIT_PER_HOUR,
+    DISCOVERY_REPO_FANS_ENABLED,
+    DISCOVERY_REPO_FANS_MAX_SEEDS,
 )
 from core.logger import get_logger
 from workers.runtime import (
@@ -77,6 +86,28 @@ class _RequestCounter:
 
         kwargs["pacer"] = _pacer
         return self._gh.followers(*args, **kwargs)
+
+    def stargazers(self, *args, **kwargs):
+        pacer = kwargs.get("pacer")
+
+        def _pacer():
+            self.requests += 1
+            if pacer is not None:
+                pacer()
+
+        kwargs["pacer"] = _pacer
+        return self._gh.stargazers(*args, **kwargs)
+
+    def contributors(self, *args, **kwargs):
+        pacer = kwargs.get("pacer")
+
+        def _pacer():
+            self.requests += 1
+            if pacer is not None:
+                pacer()
+
+        kwargs["pacer"] = _pacer
+        return self._gh.contributors(*args, **kwargs)
 
 
 def discovery_request_delay(rate_per_hour):
@@ -216,13 +247,22 @@ class GraphDiscoveryWorker(threading.Thread):
         collector = Collector(db, counter, shutdown_event=self._shutdown)
         started_at = datetime.now(timezone.utc).isoformat()
         start = time.monotonic()
-        stats = {"users_walked": 0, "new_users": 0}
+        stats = {"users_walked": 0, "new_users": 0, "seeds_mined": 0}
         try:
+            # Follower-graph pass …
             collector._discover(
                 max_users=self._pass_max_users,
                 sleep_between_users=delay,
                 stats=stats,
             )
+            # … then the repo-content pass (stargazers/contributors of the
+            # owner's own repositories) — same budget, same run record.
+            if DISCOVERY_REPO_FANS_ENABLED:
+                collector._discover_repo_fans(
+                    max_seeds=DISCOVERY_REPO_FANS_MAX_SEEDS,
+                    sleep_between_users=delay,
+                    stats=stats,
+                )
         finally:
             stop_heartbeat.set()
             heartbeat.join(timeout=5)
@@ -238,8 +278,8 @@ class GraphDiscoveryWorker(threading.Thread):
                 }
             )
         log.info(
-            "Graph discovery pass finished: %d user(s) walked, %d new "
-            "user(s), %d request(s) in %.0fs.",
-            stats["users_walked"], stats["new_users"],
-            counter.requests, duration,
+            "Graph discovery pass finished: %d user(s) walked, %d seed(s) "
+            "mined, %d new user(s), %d request(s) in %.0fs.",
+            stats["users_walked"], stats["seeds_mined"],
+            stats["new_users"], counter.requests, duration,
         )

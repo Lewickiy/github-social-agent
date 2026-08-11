@@ -7,6 +7,11 @@ rate-limit / auth errors (HTTP 401/403):
   - 3 retries with delays of 5, 10, and 15 minutes
   - After 3 failed retries, a 2-hour cooldown before resuming
 
+Phase 1b (``_discover_repo_fans``) grows the network along the CONTENT
+dimension (issue #22): the owner's own repositories are mined for
+stargazers / contributors, with the same pacing and rate-limit handling
+as the graph walk.
+
 All phases support graceful shutdown via Ctrl+C — the current user
 is finished, all data is committed to the database, and the process
 exits cleanly.
@@ -16,6 +21,7 @@ import threading
 import time
 
 from core.config import (
+    DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS,
     MY_USERNAME,
     OWNER_SYNC_DAYS,
     READ_HEAVY_FORK_LANGUAGES,
@@ -478,6 +484,214 @@ class Collector:
         return new_total
 
 
+
+    # ------------------------------------------------------------------
+    # Phase 1b — repo-content discovery (stargazers / contributors)
+    # ------------------------------------------------------------------
+
+    def _discover_repo_fans(
+        self, max_seeds=None, sleep_between_users=1.0, stats=None,
+    ):
+        """Discover new users from repo-content seeds (stargazers/contributors).
+
+        Grows the network along the CONTENT dimension: for each stale seed
+        (the owner's own repositories, rotation tracked in the
+        ``discovery_sources`` table), fetch the seed's own source type
+        (stargazers, + optionally its contributors) with the same pacing,
+        page counting and rate-limit handling as ``_discover``, and add new
+        users to the queue.  New users carry a distinguishable source —
+        ``stargazers:owner/repo`` or ``contributors:owner/repo`` — and
+        ``add_user`` dedups for free.
+
+        The seed is stamped ``last_checked_at`` / ``last_count`` after the
+        pass and the rotation moves to the next seed, so consecutive passes
+        never re-fetch the same repository end-to-end (1 request ≈ up to
+        100 candidates — far more throughput than graph walking for the
+        same budget).
+
+        *max_seeds* caps how many seeds are mined in this pass (used by the
+        discovery worker so each pass fits its hourly budget); None drains
+        the whole seed list (legacy one-shot behaviour).  *stats* is an
+        optional dict updated incrementally (``seeds_mined``, ``new_users``).
+
+        Returns
+        -------
+        int
+            Number of newly discovered users (0 if none or interrupted).
+        """
+        # Keep the seed list in sync with the owner's repositories — cheap:
+        # INSERT OR IGNORE no-ops for already-registered pairs.
+        self.db.seed_discovery_sources()
+
+        print("Repo-content discovery (stargazers/contributors) ...")
+        log.info("Phase 1b started: repo-content discovery")
+
+        new_total = 0
+        mined = 0
+
+        while max_seeds is None or mined < max_seeds:
+            if self._shutdown.is_set():
+                log.info("Shutdown requested — stopping repo-content discovery.")
+                break
+
+            seed = self.db.next_discovery_source()
+            if seed is None:
+                log.info("No discovery seeds to mine — skipping repo-content pass.")
+                break
+
+            mined += 1
+            if stats is not None:
+                stats["seeds_mined"] = mined
+
+            repo_full = seed["repo_full_name"]
+            source_type = seed["source_type"]
+            owner, _, repo_name = repo_full.partition("/")
+
+            # ── Stealth pacing before every API request (incl. every
+            #    pagination page via the pacer) ──
+            self._sleep(sleep_between_users)
+
+            # Branch on the seed's own source_type: a rotation may return a
+            # ``contributors`` row (e.g. after a failed stargazers fetch left
+            # its sibling unmined, or when contributors were seeded but the
+            # include flag was later turned off).  Fetching stargazers for a
+            # contributors row would mislabel the data and duplicate work.
+            if source_type == "contributors":
+                try:
+                    people = self.github.contributors(
+                        owner, repo_name,
+                        pacer=lambda: self._sleep(sleep_between_users),
+                    )
+                except GitHubAuthError as exc:
+                    self._abort_on_auth_error(exc)
+                    return new_total
+                except GitHubNetworkError as exc:
+                    result = self._handle_network_error(exc)
+                    if result == "shutdown":
+                        return new_total
+                    people = []
+                except GitHubRateLimitError as exc:
+                    log.warning(
+                        "Rate limit (%s) on contributors of %s",
+                        exc.status_code, repo_full,
+                    )
+                    print(f"\n  ⚠ Rate limit ({exc.status_code}) on {repo_full}")
+                    result = self._handle_rate_limit(exc)
+                    if result == "shutdown":
+                        return new_total
+                    people = []
+
+                new_count = self._add_repo_fans(people or [], repo_full, source_type)
+                self.db.mark_discovery_source_checked(
+                    repo_full, source_type, last_count=len(people or []),
+                )
+            else:  # stargazers seed
+                try:
+                    people = self.github.stargazers(
+                        owner, repo_name,
+                        pacer=lambda: self._sleep(sleep_between_users),
+                    )
+                except GitHubAuthError as exc:
+                    self._abort_on_auth_error(exc)
+                    return new_total
+                except GitHubNetworkError as exc:
+                    result = self._handle_network_error(exc)
+                    if result == "shutdown":
+                        return new_total
+                    self.db.mark_discovery_source_checked(
+                        repo_full, source_type, last_count=0,
+                    )
+                    continue
+                except GitHubRateLimitError as exc:
+                    log.warning(
+                        "Rate limit (%s) on stargazers of %s",
+                        exc.status_code, repo_full,
+                    )
+                    print(f"\n  ⚠ Rate limit ({exc.status_code}) on {repo_full}")
+                    result = self._handle_rate_limit(exc)
+                    if result == "shutdown":
+                        return new_total
+                    self.db.mark_discovery_source_checked(
+                        repo_full, source_type, last_count=0,
+                    )
+                    continue
+
+                new_count = self._add_repo_fans(people or [], repo_full, source_type)
+                self.db.mark_discovery_source_checked(
+                    repo_full, source_type, last_count=len(people or []),
+                )
+
+                # ── Optionally also mine contributors of the same seed ──
+                if DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS:
+                    self._sleep(sleep_between_users)
+                    try:
+                        contribs = self.github.contributors(
+                            owner, repo_name,
+                            pacer=lambda: self._sleep(sleep_between_users),
+                        )
+                    except GitHubAuthError as exc:
+                        self._abort_on_auth_error(exc)
+                        return new_total
+                    except GitHubNetworkError as exc:
+                        result = self._handle_network_error(exc)
+                        if result == "shutdown":
+                            return new_total
+                        contribs = []
+                    except GitHubRateLimitError as exc:
+                        log.warning(
+                            "Rate limit (%s) on contributors of %s",
+                            exc.status_code, repo_full,
+                        )
+                        print(f"\n  ⚠ Rate limit ({exc.status_code}) on {repo_full}")
+                        result = self._handle_rate_limit(exc)
+                        if result == "shutdown":
+                            return new_total
+                        contribs = []
+
+                    new_count += self._add_repo_fans(
+                        contribs or [], repo_full, "contributors",
+                    )
+                    self.db.mark_discovery_source_checked(
+                        repo_full, "contributors",
+                        last_count=len(contribs or []),
+                    )
+
+            new_total += new_count
+            if new_count:
+                print(f"  → {new_count} new users from {repo_full} ({source_type})")
+                if stats is not None:
+                    stats["new_users"] = new_total
+            else:
+                log.debug("No new users from %s (%s)", repo_full, source_type)
+
+        if self._shutdown.is_set():
+            log.info("Phase 1b interrupted by shutdown.")
+        else:
+            log.info("Phase 1b finished: %d new users discovered.", new_total)
+            print(f"\nRepo-content discovery complete: {new_total} new users.")
+
+        return new_total
+
+    def _add_repo_fans(self, people, repo_full, source_type):
+        """Add repo-content fans (stargazers/contributors) to the queue.
+
+        *people* is the raw item list from the API; each item carries a
+        ``login``.  The owner is skipped.  Returns how many users were
+        actually new (``add_user`` dedups for free, but counting only new
+        ones keeps the pass stats honest).
+        """
+        new_count = 0
+        for item in people or []:
+            uname = item.get("login") if isinstance(item, dict) else None
+            if not uname or uname == MY_USERNAME:
+                continue
+            existing = self.db.conn.execute(
+                "SELECT 1 FROM users WHERE username = ?", (uname,)
+            ).fetchone()
+            if existing is None:
+                self.db.add_user(uname, f"{source_type}:{repo_full}")
+                new_count += 1
+        return new_count
 
     # ------------------------------------------------------------------
     # Phase 2 — repository & language collection (with retry)
