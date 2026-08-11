@@ -7,6 +7,12 @@ name: github-social-agent
 services:
   github-bot:
     build: .
+    # HOST NETWORK: контейнер делит сетевой стек хоста, поэтому его трафик
+    # получает ровно ту же маршрутизацию, что и хостовые процессы — и так же
+    # работает через Outline VPN (policy-routing затягивает немаркированный
+    # трафик docker-моста в туннель, где он глохнет: connect timeout до
+    # api.github.com при работающем из хоста соединении).
+    network_mode: host
     # Запуск от текущего пользователя, чтобы файлы (БД, логи)
     # не создавались от root
     user: "${UID:-1000}:${GID:-1000}"
@@ -33,9 +39,12 @@ services:
 
   # ── Веб-дашборд (FastAPI + собранный фронтенд) ────────────────────────
   # Читает ту же SQLite-БД (./data) и может запускать режимы бота через
-  # API. Порт 8087 на хосте → 8000 в контейнере.
+  # API. Порт 8087 на хосте → uvicorn биндится прямо на хост (host-сеть
+  # игнорирует маппинг ports:), поэтому URL остаётся localhost:8087,
+  # а loopback-трафик никогда не попадает в VPN-маршруты.
   github-dashboard:
     build: .
+    network_mode: host
     user: "${UID:-1000}:${GID:-1000}"
     env_file:
       - .env
@@ -47,11 +56,10 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./models:/app/models
-    ports:
-      - "8087:8000"
     # Entrypoint переопределён на uvicorn, а CMD из образа (["--help"])
     # очищен, иначе Docker добавил бы его к аргументам uvicorn и контейнер
-    # завершился бы сразу с выводом справки.
-    entrypoint: ["python", "-u", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    # завершился бы сразу с выводом справки. Порт 8087 (а не 8000) —
+    # чтобы с host-сетью дашборд оставался доступен по прежнему адресу.
+    entrypoint: ["python", "-u", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8087"]
     command: []
     restart: unless-stopped
