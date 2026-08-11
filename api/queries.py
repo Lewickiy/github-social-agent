@@ -785,6 +785,103 @@ def discovery_stats(db):
     }
 
 
+# ── ML trend verdict (ML tab) ───────────────────────────────────────────
+# A single-run AUC is noise on a small dataset (we've seen 0.70 one week and
+# 0.58 the next), so the dashboard reduces the question "is it time to invest
+# in the model again?" to a small set of rules over the last N retrains:
+#
+#   * GREEN  — last N runs ALL >= 0.65 CV AUC, >= 1000 training samples and
+#              >= 200 positives: the model is stable above random with a
+#              healthy dataset — worth discussing features/labels or the gate.
+#   * YELLOW — average of the last N runs >= 0.60 and >= 700 samples: quality
+#              is climbing, keep training in shadow and re-check later.
+#   * RED    — otherwise: the dataset (especially the positive class) is the
+#              bottleneck — wait and let labels accumulate.
+_ML_TREND_WINDOW = 3
+_ML_TREND_GREEN_MIN_CV_AUC = 0.65
+_ML_TREND_GREEN_MIN_SAMPLES = 1000
+_ML_TREND_GREEN_MIN_POSITIVES = 200
+_ML_TREND_YELLOW_MIN_AVG_CV_AUC = 0.60
+_ML_TREND_YELLOW_MIN_SAMPLES = 700
+
+
+def _ml_trend(history, samples, positives):
+    """Compute the ML tab's green/yellow/red verdict from retrain history.
+
+    *history*  — training-run rows, newest first (as ``ml_training_runs``
+                 returns them).
+    *samples*  — current training-label pool size.
+    *positives*— current positive-label count.
+
+    Returns a dict with the verdict plus the numbers behind it so the UI can
+    show exactly why the flag is what it is.
+    """
+    window = [
+        r for r in history[:_ML_TREND_WINDOW] if r.get("cv_auc") is not None
+    ]
+    cv_values = [r["cv_auc"] for r in window]
+    if not cv_values:
+        return {
+            "level": "red",
+            "label": "Too early",
+            "verdict": (
+                "No CV metrics recorded yet — the model needs its first "
+                "retrains before a trend can be judged."
+            ),
+            "window_size": 0,
+            "recent_cv_auc": [],
+            "min_cv_auc": None,
+            "avg_cv_auc": None,
+            "samples": samples,
+            "positives": positives,
+            "latest_cv_precision": None,
+        }
+
+    min_cv = min(cv_values)
+    avg_cv = sum(cv_values) / len(cv_values)
+    latest_precision = next(
+        (r.get("cv_precision") for r in window if r.get("cv_precision") is not None),
+        None,
+    )
+
+    if (
+        len(window) >= _ML_TREND_WINDOW
+        and min_cv >= _ML_TREND_GREEN_MIN_CV_AUC
+        and samples >= _ML_TREND_GREEN_MIN_SAMPLES
+        and positives >= _ML_TREND_GREEN_MIN_POSITIVES
+    ):
+        level, label, verdict = "green", "Ready", (
+            "The model is stable above the random baseline with a healthy "
+            "dataset — it's worth discussing new features, better labels or "
+            "re-enabling the follow gate."
+        )
+    elif avg_cv >= _ML_TREND_YELLOW_MIN_AVG_CV_AUC and samples >= _ML_TREND_YELLOW_MIN_SAMPLES:
+        level, label, verdict = "yellow", "On track", (
+            "Quality is climbing but the dataset is still small — keep "
+            "training in shadow and re-check after a few more retrains."
+        )
+    else:
+        level, label, verdict = "red", "Too early", (
+            "More labeled data — especially positive examples — is needed "
+            "before the model can add value. Keep it in shadow mode."
+        )
+
+    return {
+        "level": level,
+        "label": label,
+        "verdict": verdict,
+        "window_size": len(window),
+        "recent_cv_auc": [round(v, 4) for v in cv_values],
+        "min_cv_auc": round(min_cv, 4),
+        "avg_cv_auc": round(avg_cv, 4),
+        "samples": samples,
+        "positives": positives,
+        "latest_cv_precision": (
+            round(latest_precision, 4) if latest_precision is not None else None
+        ),
+    }
+
+
 def ml_state(db):
     """Everything the ML tab needs: model, dataset, training-run history.
 
@@ -815,8 +912,11 @@ def ml_state(db):
     n_pos = sum(1 for _, lbl in training if lbl == 1)
     n_neg = len(training) - n_pos
 
+    history = db.ml_training_runs(limit=100)
+
     return {
         "current_model": _current_model_metadata(),
+        "trend": _ml_trend(history, len(training), n_pos),
         "dataset": {
             "total_users": total_users,
             "with_prediction": with_pred,
@@ -832,5 +932,5 @@ def ml_state(db):
                 n_pos / max(len(training), 1) * 100, 1
             ),
         },
-        "history": db.ml_training_runs(limit=100),
+        "history": history,
     }
