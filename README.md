@@ -105,7 +105,7 @@ Simply "switch it on" once — and watch your GitHub network grow in a targeted,
 - **Followback detector + mutual-follow check worker** — users who unfollow after a mutual follow are tracked automatically.
 - **Daily snapshots** — at midnight in the user's timezone, followers / following / public repos are recorded for growth charts.
 - **Company enrichment** — `@org` mentions from the `company` field become organization profiles.
-- **Web dashboard** — 4 pages: analytics, candidates, ML, management.
+- **Web dashboard** — 4 pages: Overview (analytics), Users (candidates), ML, Management.
 - **Worker control from the dashboard** — every background worker (9 in total) can be paused/resumed with a switch; per-worker lifecycle (started, stopped, last action, last error) is shown live.
 - **Automatic database migrations** — applied on startup by both the bot and the dashboard (lock-serialized, so simultaneous container boot is safe); a manual `--migrate` is never required.
 - **Docker deployment** — bot + dashboard in `docker-compose`; data, logs, and models survive rebuilds.
@@ -214,7 +214,7 @@ The dashboard is the system's "command center," styled after GitHub: a dark head
 |---|---|
 | ![Overview — GitHub Social Agent dashboard](docs/screenshots/overview.png) | ![Users — candidates table](docs/screenshots/users.png) |
 
-| ML — followback prediction model | Management — job launching and settings |
+| ML — followback prediction model | Management — worker control and configuration |
 |---|---|
 | ![ML — followback model panel](docs/screenshots/ml.png) | ![Management — system control](docs/screenshots/management.png) |
 
@@ -395,6 +395,7 @@ python -m migrations.runner --status       # migration status
 python -m migrations.runner --rollback     # roll back the last migration
 python -m ml_service.recompute_predictions  # recompute ML predictions for the whole database
 python -m ml_service.evaluate --new-sample 300  # model quality diagnostics
+python -m ml_service.backfill_interactions   # one-shot: recover interaction history for the ML population
 ```
 
 ---
@@ -437,13 +438,24 @@ python -m ml_service.evaluate --new-sample 300  # model quality diagnostics
 | `DISCOVERY_REPO_FANS_MAX_SEEDS` | `5` | Seeds (owner repos) mined per discovery pass |
 | `ML_ENABLED` | `True` | Enable ML predictions |
 | `ML_TRAIN_INTERVAL_HOURS` | `24` | Retrain the model every N hours |
+| `ML_TRAIN_AFTER_START` | `True` | Train the model immediately after the ML worker starts |
 | `ML_FOLLOW_GATE_ENABLED` | `False` | ML follow gate master switch (runtime-tunable in Management) |
 | `ML_FOLLOW_THRESHOLD` | `0.5` | Minimum followback probability the gate requires |
 | `REPO_FRESHNESS_DAYS` | `7` | User repository TTL |
 | `OWNER_SYNC_DAYS` | `14` | How often the owner's profile is synced |
 | `SCORE_FRESHNESS_DAYS` | `20` | Score TTL |
 | `SNAPSHOT_HOUR` | `0` | Hour of the daily snapshot (local time) |
+| `SNAPSHOT_ON_START` | `True` | Record today's snapshot immediately when the worker starts |
+| `SILENT_GATES_ENABLED` | `True` | Wait for the first followers / owner data instead of finishing with "0 users" |
+| `SILENT_MIN_OWNER_REPOS` | `1` | Minimum owner repos collected before similarity scoring is allowed |
+| `SILENT_PRIORITIZE_SMALL` | `False` | Process less-followed users first (more likely to follow back) |
+| `FOLLOWER_SCAN_DAYS` | `5` | Re-scan the owner's follower graph at most this often |
 | `SKIP_FORK_LANGUAGES` | `True` | Skip `/languages` for forks (API economy) |
+| `READ_HEAVY_FORK_LANGUAGES` | `False` | When `False`, `/languages` is skipped for heavy repos and heavy forks (secondary rate-limit protection); `True` reverts to the legacy unconditional fetch |
+| `SKIP_LANGS_MAX_SIZE_KB` | `500000` | Skip `/languages` for repositories larger than this (500 MB) |
+| `SKIP_LANGS_FORK_SIZE_KB` | `50000` | Skip `/languages` for forks larger than this (50 MB) |
+| `GITHUB_API_RATE_LIMIT` | `5000` | GitHub's hourly API ceiling — the dashboard's "GitHub API / hour" card compares traffic against it |
+| `CURRENT_SCORE_VERSION` | `4` | Version of the scoring algorithm (bump invalidates stored scores) |
 
 ---
 
