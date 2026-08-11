@@ -579,6 +579,17 @@ class GithubClient:
                 reset_at=_parse_int(r.headers.get("X-RateLimit-Reset")),
                 remaining=_parse_int(r.headers.get("X-RateLimit-Remaining")),
             )
+        if r.status_code >= 500:
+            # Transient server failure — must never be read as "we didn't
+            # star them" (the reciprocal worker would skip the star without
+            # a retry); surface it as a network error like does_user_follow_us.
+            log.warning(
+                "GitHub HTTP %s for %s — treating as network error",
+                r.status_code, url,
+            )
+            raise GitHubNetworkError(
+                url, original_exception=ValueError(f"HTTP {r.status_code}")
+            )
         log.warning("Star %s/%s failed with HTTP %s", owner, repo, r.status_code)
         return False
 
