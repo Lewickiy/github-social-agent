@@ -8,7 +8,6 @@ import {
   Target,
   TrendingUp,
   UserCheck,
-  UserMinus,
   Users,
 } from "lucide-react";
 import { api, timeAgo } from "../api";
@@ -137,7 +136,6 @@ export default function OverviewPage() {
   }
 
   const t = stats.totals;
-  const totalActions = stats.activity.reduce((a, b) => a + b.count, 0);
   // Follows and unfollows share ONE combined daily budget (50 actions),
   // so the meter always reflects the sum of both directions.
   const combinedToday = stats.today_follows + stats.today_unfollows;
@@ -217,21 +215,22 @@ export default function OverviewPage() {
               : "waiting for follows…"
           }
         />
+        {/* Combined card (issue #15): follows in green, unfollows in red,
+            black slash between, and the shared daily budget on the sub-line. */}
         <StatCard
-          label="Follows"
-          value={totalActions}
+          label="Follows/Unfollows"
+          value={
+            <span className="inline-flex items-baseline gap-x-1">
+              <span className="text-success-fg">{stats.today_follows}</span>
+              <span className="text-fg">/</span>
+              <span className="text-danger-fg">{stats.today_unfollows}</span>
+            </span>
+          }
           icon={<TrendingUp size={16} />}
           accent={
             combinedPct >= 90 ? "danger" : combinedPct >= 70 ? "attention" : "default"
           }
-          sub={`${stats.today_follows} followed · ${stats.today_unfollows} unfollowed today — ${combinedToday}/${stats.daily_limit} combined`}
-        />
-        <StatCard
-          label="Unfollowed"
-          value={stats.today_unfollows}
-          icon={<UserMinus size={16} />}
-          accent="attention"
-          sub={`${t.unfollowed_no_interaction} total inactive (no interaction)`}
+          sub={`${combinedToday}/${stats.daily_limit} combined`}
         />
         <StatCard
           label="ML followback candidates"
