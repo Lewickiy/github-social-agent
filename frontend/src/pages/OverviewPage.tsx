@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  Activity,
   Gauge,
   HeartHandshake,
   Sparkles,
@@ -20,9 +19,9 @@ import { actionMeta } from "../status";
 import { useRefresh } from "../refresh";
 
 /**
- * Data window for the interval-dependent blocks (activity count + the
- * Recent activity feed).  The Followers growth chart is deliberately NOT
- * scoped by this — it always covers a fixed 30-day snapshot window.
+ * Data window for the interval-dependent blocks (the Recent activity
+ * feed).  The Followers growth chart is deliberately NOT scoped by this
+ * — it always covers a fixed 30-day snapshot window.
  */
 export const OVERVIEW_INTERVALS = [
   { label: "Today", days: 1 },
@@ -119,7 +118,7 @@ export default function OverviewPage() {
       <div className="max-w-[1280px] mx-auto p-6 animate-pulse">
         <div className="h-6 w-48 bg-border-muted rounded mb-4" />
         <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-          {Array.from({ length: 8 }).map((_, i) => (
+          {Array.from({ length: 7 }).map((_, i) => (
             <div key={i} className="card h-[88px]" />
           ))}
         </div>
@@ -139,8 +138,6 @@ export default function OverviewPage() {
   // Follows and unfollows share ONE combined daily budget (50 actions),
   // so the meter always reflects the sum of both directions.
   const combinedToday = stats.today_follows + stats.today_unfollows;
-  const activityLabel =
-    days === 1 ? "Activity today" : `Activity (${days}d)`;
   const intervalWord = days === 1 ? "today" : `last ${days} days`;
 
   return (
@@ -241,12 +238,6 @@ export default function OverviewPage() {
           icon={<Sparkles size={16} />}
           accent="attention"
           sub="predicted likely to follow back"
-        />
-        <StatCard
-          label={activityLabel}
-          value={stats.total_actions}
-          icon={<Activity size={16} />}
-          sub="lifecycle events logged"
         />
         {/* The bold figure always reports the live per-hour request rate and
             its share of the hourly quota — regardless of the selected interval.
