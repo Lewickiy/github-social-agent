@@ -288,6 +288,23 @@ DISCOVERY_WORKER_ENABLED = True
 DISCOVERY_RATE_LIMIT_PER_HOUR = 500
 DISCOVERY_PASS_MAX_USERS = 500
 
+# Repo-content discovery (issue #22) — grow the network along the CONTENT
+# dimension, not just the follower graph.  The same calm worker additionally
+# mines the owner's own repositories (seeds, rotation tracked in the
+# ``discovery_sources`` table) for stargazers and optionally contributors —
+# people who already publicly declared interest in exactly the kind of
+# content the owner produces.  1 request ≈ up to 100 candidates, far more
+# throughput than graph walking for the same budget.
+#
+#   * ``DISCOVERY_REPO_FANS_ENABLED`` — master toggle for the pass.
+#   * ``DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS`` — also fetch
+#     contributors of each seed (stargazers are always fetched).
+#   * ``DISCOVERY_REPO_FANS_MAX_SEEDS`` — seeds mined per pass (each seed
+#     is 1-2 requests: stargazers + optional contributors).
+DISCOVERY_REPO_FANS_ENABLED = True
+DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS = True
+DISCOVERY_REPO_FANS_MAX_SEEDS = 5
+
 # =====================================================
 # ML — нейронная сеть для прогнозирования FOLLOWBACK
 # =====================================================

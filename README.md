@@ -405,6 +405,9 @@ python -m ml_service.evaluate --new-sample 300  # model quality diagnostics
 | `DISCOVERY_WORKER_ENABLED` | `True` | Fresh-install default of the Graph-discovery worker toggle |
 | `DISCOVERY_RATE_LIMIT_PER_HOUR` | `500` | Hourly request budget of the graph-growth worker |
 | `DISCOVERY_PASS_MAX_USERS` | `500` | Users per graph-growth pass |
+| `DISCOVERY_REPO_FANS_ENABLED` | `True` | Mine owner repos for stargazers/contributors each pass |
+| `DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS` | `True` | Also fetch contributors of each seed (stargazers always) |
+| `DISCOVERY_REPO_FANS_MAX_SEEDS` | `5` | Seeds (owner repos) mined per discovery pass |
 | `ML_ENABLED` | `True` | Enable ML predictions |
 | `ML_TRAIN_INTERVAL_HOURS` | `24` | Retrain the model every N hours |
 | `REPO_FRESHNESS_DAYS` | `7` | User repository TTL |
