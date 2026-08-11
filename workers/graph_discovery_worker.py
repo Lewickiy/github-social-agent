@@ -273,7 +273,6 @@ class GraphDiscoveryWorker(threading.Thread):
                     "finished_at": datetime.now(timezone.utc).isoformat(),
                     "users_walked": stats["users_walked"],
                     "new_users": stats["new_users"],
-                    "seeds_mined": stats["seeds_mined"],
                     "requests": counter.requests,
                     "duration_seconds": round(duration, 1),
                 }

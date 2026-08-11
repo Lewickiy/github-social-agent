@@ -21,6 +21,7 @@ import threading
 import time
 
 from core.config import (
+    DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS,
     MY_USERNAME,
     OWNER_SYNC_DAYS,
     READ_HEAVY_FORK_LANGUAGES,
@@ -495,11 +496,12 @@ class Collector:
 
         Grows the network along the CONTENT dimension: for each stale seed
         (the owner's own repositories, rotation tracked in the
-        ``discovery_sources`` table), fetch its stargazers (+ optionally its
-        contributors) with the same pacing, page counting and rate-limit
-        handling as ``_discover``, and add new users to the queue.  New
-        users carry a distinguishable source — ``stargazers:owner/repo`` or
-        ``contributors:owner/repo`` — and ``add_user`` dedups for free.
+        ``discovery_sources`` table), fetch the seed's own source type
+        (stargazers, + optionally its contributors) with the same pacing,
+        page counting and rate-limit handling as ``_discover``, and add new
+        users to the queue.  New users carry a distinguishable source —
+        ``stargazers:owner/repo`` or ``contributors:owner/repo`` — and
+        ``add_user`` dedups for free.
 
         The seed is stamped ``last_checked_at`` / ``last_count`` after the
         pass and the rotation moves to the next seed, so consecutive passes
@@ -517,8 +519,6 @@ class Collector:
         int
             Number of newly discovered users (0 if none or interrupted).
         """
-        from core.config import DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS
-
         # Keep the seed list in sync with the owner's repositories — cheap:
         # INSERT OR IGNORE no-ops for already-registered pairs.
         self.db.seed_discovery_sources()
@@ -550,50 +550,15 @@ class Collector:
             # ── Stealth pacing before every API request (incl. every
             #    pagination page via the pacer) ──
             self._sleep(sleep_between_users)
-            try:
-                people = self.github.stargazers(
-                    owner, repo_name,
-                    pacer=lambda: self._sleep(sleep_between_users),
-                )
-            except GitHubAuthError as exc:
-                self._abort_on_auth_error(exc)
-                return new_total
-            except GitHubNetworkError as exc:
-                result = self._handle_network_error(exc)
-                if result == "shutdown":
-                    return new_total
-                self.db.mark_discovery_source_checked(
-                    repo_full, source_type, last_count=0,
-                )
-                continue
-            except GitHubRateLimitError as exc:
-                log.warning(
-                    "Rate limit (%s) on stargazers of %s",
-                    exc.status_code, repo_full,
-                )
-                print(f"\n  ⚠ Rate limit ({exc.status_code}) on {repo_full}")
-                result = self._handle_rate_limit(exc)
-                if result == "shutdown":
-                    return new_total
-                self.db.mark_discovery_source_checked(
-                    repo_full, source_type, last_count=0,
-                )
-                continue
 
-            last_count = len(people or [])
-            new_count = self._add_repo_fans(people or [], repo_full, source_type)
-            self.db.mark_discovery_source_checked(
-                repo_full, source_type, last_count=last_count,
-            )
-
-            # ── Optionally also mine contributors of the same seed ──
-            if (
-                source_type == "stargazers"
-                and DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS
-            ):
-                self._sleep(sleep_between_users)
+            # Branch on the seed's own source_type: a rotation may return a
+            # ``contributors`` row (e.g. after a failed stargazers fetch left
+            # its sibling unmined, or when contributors were seeded but the
+            # include flag was later turned off).  Fetching stargazers for a
+            # contributors row would mislabel the data and duplicate work.
+            if source_type == "contributors":
                 try:
-                    contribs = self.github.contributors(
+                    people = self.github.contributors(
                         owner, repo_name,
                         pacer=lambda: self._sleep(sleep_between_users),
                     )
@@ -604,7 +569,7 @@ class Collector:
                     result = self._handle_network_error(exc)
                     if result == "shutdown":
                         return new_total
-                    contribs = []
+                    people = []
                 except GitHubRateLimitError as exc:
                     log.warning(
                         "Rate limit (%s) on contributors of %s",
@@ -614,14 +579,82 @@ class Collector:
                     result = self._handle_rate_limit(exc)
                     if result == "shutdown":
                         return new_total
-                    contribs = []
+                    people = []
 
-                new_count += self._add_repo_fans(
-                    contribs or [], repo_full, "contributors",
-                )
+                new_count = self._add_repo_fans(people or [], repo_full, source_type)
                 self.db.mark_discovery_source_checked(
-                    repo_full, "contributors", last_count=len(contribs or []),
+                    repo_full, source_type, last_count=len(people or []),
                 )
+            else:  # stargazers seed
+                try:
+                    people = self.github.stargazers(
+                        owner, repo_name,
+                        pacer=lambda: self._sleep(sleep_between_users),
+                    )
+                except GitHubAuthError as exc:
+                    self._abort_on_auth_error(exc)
+                    return new_total
+                except GitHubNetworkError as exc:
+                    result = self._handle_network_error(exc)
+                    if result == "shutdown":
+                        return new_total
+                    self.db.mark_discovery_source_checked(
+                        repo_full, source_type, last_count=0,
+                    )
+                    continue
+                except GitHubRateLimitError as exc:
+                    log.warning(
+                        "Rate limit (%s) on stargazers of %s",
+                        exc.status_code, repo_full,
+                    )
+                    print(f"\n  ⚠ Rate limit ({exc.status_code}) on {repo_full}")
+                    result = self._handle_rate_limit(exc)
+                    if result == "shutdown":
+                        return new_total
+                    self.db.mark_discovery_source_checked(
+                        repo_full, source_type, last_count=0,
+                    )
+                    continue
+
+                new_count = self._add_repo_fans(people or [], repo_full, source_type)
+                self.db.mark_discovery_source_checked(
+                    repo_full, source_type, last_count=len(people or []),
+                )
+
+                # ── Optionally also mine contributors of the same seed ──
+                if DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS:
+                    self._sleep(sleep_between_users)
+                    try:
+                        contribs = self.github.contributors(
+                            owner, repo_name,
+                            pacer=lambda: self._sleep(sleep_between_users),
+                        )
+                    except GitHubAuthError as exc:
+                        self._abort_on_auth_error(exc)
+                        return new_total
+                    except GitHubNetworkError as exc:
+                        result = self._handle_network_error(exc)
+                        if result == "shutdown":
+                            return new_total
+                        contribs = []
+                    except GitHubRateLimitError as exc:
+                        log.warning(
+                            "Rate limit (%s) on contributors of %s",
+                            exc.status_code, repo_full,
+                        )
+                        print(f"\n  ⚠ Rate limit ({exc.status_code}) on {repo_full}")
+                        result = self._handle_rate_limit(exc)
+                        if result == "shutdown":
+                            return new_total
+                        contribs = []
+
+                    new_count += self._add_repo_fans(
+                        contribs or [], repo_full, "contributors",
+                    )
+                    self.db.mark_discovery_source_checked(
+                        repo_full, "contributors",
+                        last_count=len(contribs or []),
+                    )
 
             new_total += new_count
             if new_count:
