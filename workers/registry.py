@@ -58,6 +58,15 @@ WORKERS = (
         ),
     },
     {
+        "key": "attention",
+        "label": "Attention",
+        "description": (
+            "Hourly poll of the owner's event timeline — records who "
+            "starred / forked / opened issues or PRs on your repos and "
+            "adds new interactors to the pipeline."
+        ),
+    },
+    {
         "key": "snapshot",
         "label": "Snapshots",
         "description": (

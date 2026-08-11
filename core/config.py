@@ -250,6 +250,26 @@ SILENT_MIN_OWNER_REPOS = 1
 SILENT_CONTINUOUS = True
 
 # =====================================================
+# ATTENTION WORKER — react to interactions with our repos
+# =====================================================
+
+# A dedicated daemon thread (workers/attention_worker.py) polls the owner's
+# received-events timeline once per hour, persists every interaction (star /
+# fork / issue / PR / comment / … on the owner's repositories, or a follow
+# of the owner) into the ``interactions`` table, adds new actors to the
+# pipeline queue (source ``repo_interaction``) and — via the persisted
+# interactions — protects already-followed users from the unfollow worker.
+#
+# ATTENTION_WORKER_ENABLED only seeds the *fresh-install* default of the
+# Management-tab toggle (migration 030); at runtime the worker's
+# enabled/disabled state lives in the worker_status table and is controlled
+# from the dashboard like every other worker.
+ATTENTION_WORKER_ENABLED = True
+
+# How often (hours) the attention worker polls the owner's event timeline.
+ATTENTION_POLL_INTERVAL_HOURS = 1
+
+# =====================================================
 # GRAPH DISCOVERY WORKER — separate calm background thread
 # =====================================================
 
