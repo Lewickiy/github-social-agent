@@ -8,6 +8,7 @@ import {
   Target,
   TrendingUp,
   UserCheck,
+  UserMinus,
   Users,
 } from "lucide-react";
 import { api, timeAgo } from "../api";
@@ -137,7 +138,10 @@ export default function OverviewPage() {
 
   const t = stats.totals;
   const totalActions = stats.activity.reduce((a, b) => a + b.count, 0);
-  const pctLimit = Math.round((stats.today_follows / stats.daily_limit) * 100);
+  // Follows and unfollows share ONE combined daily budget (50 actions),
+  // so the meter always reflects the sum of both directions.
+  const combinedToday = stats.today_follows + stats.today_unfollows;
+  const combinedPct = Math.round((combinedToday / stats.daily_limit) * 100);
   const activityLabel =
     days === 1 ? "Activity today" : `Activity (${days}d)`;
   const intervalWord = days === 1 ? "today" : `last ${days} days`;
@@ -217,12 +221,17 @@ export default function OverviewPage() {
           label="Follows"
           value={totalActions}
           icon={<TrendingUp size={16} />}
-          accent={pctLimit >= 90 ? "danger" : pctLimit >= 70 ? "attention" : "default"}
-          sub={`${stats.today_follows}/${stats.daily_limit} today · ${
-            stats.followers_count != null
-              ? `${stats.followers_count} followers now`
-              : "no follower snapshot yet"
-          }`}
+          accent={
+            combinedPct >= 90 ? "danger" : combinedPct >= 70 ? "attention" : "default"
+          }
+          sub={`${stats.today_follows} followed · ${stats.today_unfollows} unfollowed today — ${combinedToday}/${stats.daily_limit} combined`}
+        />
+        <StatCard
+          label="Unfollowed"
+          value={stats.today_unfollows}
+          icon={<UserMinus size={16} />}
+          accent="attention"
+          sub={`${t.unfollowed_no_interaction} total inactive (no interaction)`}
         />
         <StatCard
           label="ML followback candidates"

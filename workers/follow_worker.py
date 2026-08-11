@@ -47,6 +47,7 @@ from core.github_client import (
 )
 from core.logger import get_logger
 from workers.runtime import (
+    SOCIAL_ACTION_LOCK,
     is_enabled,
     mark_action,
     mark_error,
@@ -62,11 +63,10 @@ log = get_logger(__name__)
 # Key of this worker in the worker_status table (dashboard toggle/status).
 WORKER_KEY = "follow"
 
-# Serialises the follow-queue drain.  The worker is the only follower in
-# the system, so the lock is a single-consumer invariant — it stays so the
-# check-then-act sequence (budget → already-following → follow) can never
-# be raced by a future second consumer.
-_FOLLOW_LOCK = threading.RLock()
+# The daily follow budget is SHARED with the UnfollowWorker (one combined
+# 50-action pool), so the check-then-act sequence (budget →
+# already-following → follow) is serialised on the shared lock — the two
+# threads can never both pass the budget check and overspend the day.
 
 # After this many consecutive rate-limit hits the worker stops retrying
 # and sleeps a long cooldown (mirrors SilentRunner._handle_rate_limit).
@@ -163,9 +163,9 @@ class FollowWorker(threading.Thread):
 
                 if outcome == "exhausted":
                     log.info(
-                        "Daily follow budget reached (%d/%d) — next attempt "
-                        "after local midnight.",
-                        db.today_follows(), DAILY_FOLLOW_LIMIT,
+                        "Daily follow+unfollow budget reached (%d/%d) — "
+                        "next attempt after local midnight.",
+                        db.today_social_actions(), DAILY_FOLLOW_LIMIT,
                     )
                     if not sleep_interruptible(
                         self._shutdown, self._seconds_until_midnight(db),
@@ -280,20 +280,21 @@ class FollowWorker(threading.Thread):
     def _follow_user(self, db, github, username, score):
         """Follow *username* if the daily budget allows.
 
-        Serialised via ``_FOLLOW_LOCK`` so the check-then-act sequence can
+        Serialised via the shared ``SOCIAL_ACTION_LOCK`` (follows and
+        unfollows draw from one budget) so the check-then-act sequence can
         never be raced.  Returns one of ``"followed"``, ``"already"``,
         ``"no_budget"``, ``"rate_limited"``, ``"skipped"``, ``"shutdown"``.
         """
-        with _FOLLOW_LOCK:
+        with SOCIAL_ACTION_LOCK:
             return self._follow_user_unlocked(db, github, username, score)
 
     def _follow_user_unlocked(self, db, github, username, score):
-        """Follow logic — run with ``_FOLLOW_LOCK`` already held."""
-        done_today = db.today_follows()
+        """Follow logic — run with ``SOCIAL_ACTION_LOCK`` already held."""
+        done_today = db.today_social_actions()
         remaining = DAILY_FOLLOW_LIMIT - done_today
         if remaining <= 0:
             log.info(
-                "Daily follow limit reached (%d/%d).",
+                "Daily follow+unfollow limit reached (%d/%d).",
                 done_today, DAILY_FOLLOW_LIMIT,
             )
             return "no_budget"
@@ -335,8 +336,8 @@ class FollowWorker(threading.Thread):
                 db.mark_followed(username)
                 mark_action(db, WORKER_KEY)
                 log.info(
-                    "Followed %s (score %d) [%d/%d]",
-                    username, score, db.today_follows(), DAILY_FOLLOW_LIMIT,
+                    "Followed %s (score %d) [%d/%d today]",
+                    username, score, db.today_social_actions(), DAILY_FOLLOW_LIMIT,
                 )
                 return "followed"
             log.warning("Failed to follow %s", username)

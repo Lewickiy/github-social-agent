@@ -46,10 +46,16 @@ export interface Stats {
     followed: number;
     followbacks: number;
     unfollowed_after_mutual: number;
+    /** Users we actively unfollowed for never interacting with the owner. */
+    unfollowed_no_interaction: number;
     deleted: number;
     ml_positive: number;
   };
   today_follows: number;
+  /** Active unfollows today (unfollow worker, "no interaction" cases). */
+  today_unfollows: number;
+  /** Combined follows + unfollows today (shared daily budget). */
+  today_actions: number;
   daily_limit: number;
   owner: string | null;
   followers_count: number | null;

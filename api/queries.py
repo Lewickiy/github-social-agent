@@ -170,6 +170,9 @@ def overview_stats(db, daily_limit, days=None):
         followed = entered_in_window("FOLLOWED")
         followbacks = entered_in_window("FOLLOWBACK")
         unfollowed = entered_in_window("UNFOLLOWED_AFTER_MUTUAL_FOLLOW")
+        no_interaction_unfollowed = entered_in_window(
+            "UNFOLLOWED_NO_INTERACTION"
+        )
         deleted = entered_in_window("DELETED")
     else:
         # All-time counts come straight from the narrow materialised
@@ -185,6 +188,7 @@ def overview_stats(db, daily_limit, days=None):
         followed = current_count("FOLLOWED")
         followbacks = current_count("FOLLOWBACK")
         unfollowed = current_count("UNFOLLOWED_AFTER_MUTUAL_FOLLOW")
+        no_interaction_unfollowed = current_count("UNFOLLOWED_NO_INTERACTION")
         deleted = current_count("DELETED")
     # Real processing queue: users still awaiting repo collection / fresh
     # scoring (same eligibility the silent runner uses).  `status = 'NEW'`
@@ -198,12 +202,20 @@ def overview_stats(db, daily_limit, days=None):
         scored_p,
     )
     # "Today" follows the user's local calendar day (core.tz), so the
-    # daily budget meter resets at local midnight.
+    # daily budget meter resets at local midnight.  Follows and unfollows
+    # share one combined budget (DAILY_FOLLOW_LIMIT), so both are counted
+    # and summed for the meter.
     today_follows = count(
         "SELECT COUNT(*) FROM actions "
         "WHERE action = 'FOLLOW' AND created_at >= ?",
         (local_midnight_utc(db).isoformat(),),
     )
+    today_unfollows = count(
+        "SELECT COUNT(*) FROM actions "
+        "WHERE action = 'UNFOLLOW' AND created_at >= ?",
+        (local_midnight_utc(db).isoformat(),),
+    )
+    today_actions = today_follows + today_unfollows
     owner = db.get_owner()
 
     return {
@@ -215,10 +227,13 @@ def overview_stats(db, daily_limit, days=None):
             "followed": followed,
             "followbacks": followbacks,
             "unfollowed_after_mutual": unfollowed,
+            "unfollowed_no_interaction": no_interaction_unfollowed,
             "deleted": deleted,
             "ml_positive": ml_positive,
         },
         "today_follows": today_follows,
+        "today_unfollows": today_unfollows,
+        "today_actions": today_actions,
         "daily_limit": daily_limit,
         "owner": owner,
         "followers_count": (

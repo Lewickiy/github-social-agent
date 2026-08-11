@@ -73,12 +73,17 @@ HEADERS = _LazyHeaders()
 # BOT SETTINGS
 # =====================================================
 
+# The daily social-action budget — a COMBINED cap shared by follows and
+# unfollows: FollowWorker + UnfollowWorker together may perform at most
+# 50 actions per local day (e.g. 40 follows + 10 unfollows).  Both workers
+# count against this single pool (see Database.today_social_actions).
 DAILY_FOLLOW_LIMIT = 50
 
 # Random pause between two follow actions (seconds).  The FollowWorker is
 # the only follower in the system: it spaces subscriptions 20–30 minutes
 # apart, so the daily budget (≈50 follows, one every ~25 min) is spread
-# across the whole day instead of being spent in a burst.
+# across the whole day instead of being spent in a burst.  The
+# UnfollowWorker uses the same random 20–30 min pacing.
 FOLLOW_INTERVAL_MIN_SECONDS = 20 * 60
 FOLLOW_INTERVAL_MAX_SECONDS = 30 * 60
 

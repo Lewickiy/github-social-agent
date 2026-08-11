@@ -37,6 +37,13 @@ PAUSE_POLL_SECONDS = 5
 _last_heartbeat: dict[str, float] = {}
 _heartbeat_lock = threading.Lock()
 
+# Serialises the shared daily follow+unfollow budget.  Both the
+# FollowWorker and the UnfollowWorker draw from the same 50-action pool
+# (Database.today_social_actions), so their check-then-act sequences
+# (budget → act) are guarded by this one lock — otherwise the two threads
+# could both pass the "budget left" check and overspend the day together.
+SOCIAL_ACTION_LOCK = threading.RLock()
+
 
 def _heartbeat_due(key):
     with _heartbeat_lock:

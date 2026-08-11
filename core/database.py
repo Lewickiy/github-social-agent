@@ -1001,6 +1001,42 @@ class Database:
             (since,),
         ).fetchone()[0]
 
+    def today_unfollows(self):
+        """Count UNFOLLOW events since the start of the local day.
+
+        Mirrors :meth:`today_follows` — the active-unfollow worker logs an
+        UNFOLLOW event per unfollow, so the shared daily budget can count
+        both directions.
+        """
+        since = local_midnight_utc(self).isoformat()
+        return self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM actions
+            WHERE action = 'UNFOLLOW'
+              AND created_at >= ?
+            """,
+            (since,),
+        ).fetchone()[0]
+
+    def today_social_actions(self):
+        """Count today's follows + unfollows (the shared daily budget).
+
+        The daily follow limit is a combined cap: follows (FollowWorker)
+        and unfollows (UnfollowWorker) draw from the same 50-action pool,
+        so both workers must check this — never ``today_follows`` alone.
+        """
+        since = local_midnight_utc(self).isoformat()
+        return self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM actions
+            WHERE action IN ('FOLLOW', 'UNFOLLOW')
+              AND created_at >= ?
+            """,
+            (since,),
+        ).fetchone()[0]
+
     # --------------------------------------------------
     # Repositories
     # --------------------------------------------------
