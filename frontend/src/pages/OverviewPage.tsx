@@ -139,7 +139,6 @@ export default function OverviewPage() {
   // Follows and unfollows share ONE combined daily budget (50 actions),
   // so the meter always reflects the sum of both directions.
   const combinedToday = stats.today_follows + stats.today_unfollows;
-  const combinedPct = Math.round((combinedToday / stats.daily_limit) * 100);
   const activityLabel =
     days === 1 ? "Activity today" : `Activity (${days}d)`;
   const intervalWord = days === 1 ? "today" : `last ${days} days`;
