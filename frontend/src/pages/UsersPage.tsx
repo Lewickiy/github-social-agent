@@ -31,10 +31,12 @@ const STATUS_FILTERS = [
   { value: "NEW", label: "New" },
   { value: "FOLLOWED", label: "Followed" },
   { value: "FOLLOWBACK", label: "Followback" },
-  { value: "UNFOLLOWED_AFTER_MUTUAL_FOLLOW", label: "Unfollowed" },
+  // Labels mirror STATUS_META (issue #13) so the filter wording stays
+  // consistent with the Pipeline Status chart and the activity feed.
+  { value: "UNFOLLOWED_AFTER_MUTUAL_FOLLOW", label: "They unfollowed us" },
   {
     value: "UNFOLLOWED_NO_INTERACTION",
-    label: "Unfollowed (no interaction)",
+    label: "We unfollowed (no interaction)",
   },
   { value: "DELETED", label: "Deleted" },
 ];

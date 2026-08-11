@@ -66,7 +66,10 @@ function splitLabelLines(label: string, maxLen: number): string[] {
  */
 function StatusTick(props: any) {
   const { x, y, payload } = props;
-  const lines = splitLabelLines(payload.value, 12);
+  // payload.value is the raw status key — map to the human label exactly
+  // like the old tickFormatter did (the wrapped text must stay readable).
+  const label = STATUS_META[payload.value]?.label ?? payload.value;
+  const lines = splitLabelLines(label, 12);
   return (
     <text x={x} y={y} dy={12} textAnchor="middle" fill="#656d76" fontSize={10}>
       {lines.map((line, i) => (
@@ -95,6 +98,7 @@ export function StatusBars({ data }: { data: StatusCount[] }) {
           <XAxis
             dataKey="status"
             interval={0}
+            height={38}
             tick={<StatusTick />}
             tickLine={false}
             axisLine={{ stroke: "#d0d7de" }}
