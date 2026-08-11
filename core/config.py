@@ -297,7 +297,12 @@ ML_MODEL_DIR = "models"            # directory for saved model files
 #   * Candidates with no prediction yet (NULL — scored before ML existed
 #     or inference failed) are NOT vetoed: the gate only blocks a
 #     definitive 0, so the queue keeps flowing.
-ML_FOLLOW_GATE_ENABLED = True
+#
+# The gate is OFF by default: the bot follows by heuristic score exactly
+# as before, while the model still trains and refreshes predictions in
+# the background (shadow mode) — flip the Management-tab toggle to make
+# the gate a hard second opinion again.
+ML_FOLLOW_GATE_ENABLED = False
 ML_FOLLOW_THRESHOLD = 0.5
 
 # Feature dimensionality.  Kept deliberately small: with a tiny training
