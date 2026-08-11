@@ -196,12 +196,17 @@ export default function OverviewPage() {
           icon={<Target size={16} />}
           sub={`${t.scored_positive.toLocaleString()} with score > 0`}
         />
+        {/* Pipeline-state metric (issue #16): how many users are in the
+            followed status — NOT how many follow actions were performed
+            (that is the Follows/Unfollows card).  Renamed from "Followed"
+            so the two cards can't be confused. */}
         <StatCard
-          label="Followed"
+          label="Following now"
           value={t.followed}
           icon={<UserCheck size={16} />}
           accent="accent"
-          sub={`${t.unfollowed_after_mutual} unfollowed after mutual`}
+          sub={`${t.unfollowed_after_mutual} after mutual`}
+          hint={`Users in the followed status in this period · ${t.unfollowed_after_mutual} later unfollowed after a mutual follow`}
         />
         <StatCard
           label="Followbacks"
