@@ -606,6 +606,26 @@ def _ml_follow_config_view(db):
     }
 
 
+def _ml_follow_gate_block_reason(trend):
+    """Human-readable reason the gate cannot be enabled, or None.
+
+    Hard block: while the ML trend verdict is red ("Too early") the gate
+    must stay off — the model has not proven itself yet, so acting on its
+    predictions would veto follow candidates based on noise.  Disabling
+    the gate or tuning the threshold are always allowed (both are
+    harmless while the gate is off), so only ``enabled=True`` is checked.
+    """
+    if trend.get("level") != "red":
+        return None
+    label = trend.get("label") or "Too early"
+    verdict = trend.get("verdict") or ""
+    return (
+        f"Cannot enable the ML follow gate while the model is in "
+        f"\"{label}\" state. {verdict} The gate stays off (shadow mode) "
+        f"until the model proves itself — track progress on the ML tab."
+    )
+
+
 def _kick_ml_recompute():
     """Recompute all stored predictions in a background thread.
 
@@ -652,6 +672,11 @@ def ml_follow_config_set(payload: MLFollowConfig):
     background recompute of every stored prediction, so the gate and the
     dashboard's "ML candidates" stat switch over immediately.
 
+    Hard block: while the ML trend verdict is red ("Too early") the gate
+    cannot be switched ON — the request is rejected with 409 and a
+    readable reason (the model has not proven itself yet).  Disabling the
+    gate and tuning the threshold remain allowed in that state.
+
     The recompute is best-effort: it is skipped when one is already
     running (the bot process may be recomputing after a daily retrain).
     In that case labels converge at the next scoring pass or retrain —
@@ -660,6 +685,15 @@ def ml_follow_config_set(payload: MLFollowConfig):
     db = _db()
     threshold_changed = False
     try:
+        # Hard block: switching the gate ON is rejected while the ML
+        # trend is red ("Too early") — see _ml_follow_gate_block_reason.
+        # The 409 carries a human-readable detail the UI shows verbatim.
+        # Reusing ml_state guarantees the exact verdict the ML tab shows
+        # (a few counting queries on a rare user action — fine).
+        if payload.enabled is True:
+            reason = _ml_follow_gate_block_reason(ml_state(db)["trend"])
+            if reason:
+                raise HTTPException(status_code=409, detail=reason)
         if payload.threshold is not None:
             if not 0.0 <= payload.threshold <= 1.0:
                 raise HTTPException(
