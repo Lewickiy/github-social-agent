@@ -148,6 +148,37 @@ def should_fetch_languages(repo,
     return True
 
 
+def _paginate(client, path, pacer=None, max_pages=None):
+    """Fetch all pages of a ``per_page=100`` paginated endpoint.
+
+    *client*  — a :class:`GithubClient` (its ``request`` raises the
+                standard ``GitHubRateLimitError`` / ``GitHubAuthError`` /
+                ``GitHubNetworkError`` on failure — never swallowed).
+    *path*    — the API path without query string.
+    *pacer*   — optional zero-arg callable invoked before every page
+                request (rate control, same hook as ``followers()``).
+    *max_pages* — optional page cap (timeline endpoints return at most
+                ~3 pages of events); None = paginate to the end.
+
+    Returns the concatenated list of raw items.
+    """
+    result = []
+    page = 1
+    while max_pages is None or page <= max_pages:
+        if pacer is not None:
+            pacer()
+        data = client.request(
+            "GET", path, params={"per_page": 100, "page": page},
+        )
+        if not data:
+            break
+        result.extend(data)
+        if len(data) < 100:
+            break
+        page += 1
+    return result
+
+
 # ── Exceptions ────────────────────────────────────────────────────────────
 
 
@@ -366,6 +397,68 @@ class GithubClient:
         """Return the public profile for *username*."""
         return self.request("GET", f"/users/{username}")
 
+    def stargazers(self, owner, repo, pacer=None):
+        """Return all stargazers of *owner/repo* (paginated).
+
+        ``GET /repos/{owner}/{repo}/stargazers?per_page=100``.  Each item
+        carries a ``login`` (with the default media type; the star+json
+        variant nests it under ``user``).  The repo-content discovery pass
+        reads ``item["login"]``.
+
+        *pacer* is an optional zero-arg callable invoked before every page
+        request (rate control — same hook as ``followers()``).  "Heavy"
+        endpoints like this one trip GitHub's secondary (abuse) limits
+        aggressively, so errors propagate through the standard
+        ``GitHubRateLimitError`` / ``GitHubAuthError`` / ``GitHubNetworkError``
+        types and are never swallowed as empty results.
+
+        ACCESS NOTE (since 2026-06-30): GitHub restricts stargazer
+        listings to repository administrators/collaborators — third-party
+        repos answer 404.  This is fine for repo-content discovery, whose
+        seeds are the OWNER's repositories (the owner is their admin);
+        the 404 is handled as an empty result like any other missing
+        resource.
+        """
+        return _paginate(
+            self, f"/repos/{owner}/{repo}/stargazers", pacer=pacer,
+        )
+
+    def contributors(self, owner, repo, pacer=None):
+        """Return all contributors of *owner/repo* (paginated).
+
+        ``GET /repos/{owner}/{repo}/contributors?per_page=100``.  Each
+        item carries a ``login`` directly.  Same pacer / error semantics
+        as ``stargazers()``.
+        """
+        return _paginate(
+            self, f"/repos/{owner}/{repo}/contributors", pacer=pacer,
+        )
+
+    def user_events(self, username, pacer=None):
+        """Events received by *username* — the inbound-attention timeline.
+
+        ``GET /users/{username}/received_events?per_page=100``, capped at
+        3 pages (~300 events / 90-day window — the same cap as
+        ``services/interactions.py``).
+
+        NOTE on endpoint choice: the plain ``/users/{username}/events``
+        feed contains only events *performed by* the user (pushes, stars,
+        …) and never surfaces other people's WatchEvent / ForkEvent /
+        IssueEvent on their repositories — i.e. it cannot feed the
+        attention worker.  ``received_events`` is the public timeline of
+        things that happened *to* the user (stars/forks/issues/PRs on
+        their repos, follows), which is exactly what the attention worker
+        polls.  Same pacer / error semantics as ``followers()``.
+        """
+        return _paginate(
+            self, f"/users/{username}/received_events", pacer=pacer,
+            max_pages=self._MAX_EVENT_PAGES,
+        )
+
+    # Maximum pages for timeline-style endpoints (GitHub caps the public
+    # event feeds at ~300 events over a 90-day window).
+    _MAX_EVENT_PAGES = 3
+
     def follow(self, username):
         """Follow *username*. Returns True on success."""
         try:
@@ -453,6 +546,51 @@ class GithubClient:
                 url, original_exception=ValueError(f"HTTP {r.status_code}")
             )
         log.warning("Unexpected HTTP %s for %s — assuming no", r.status_code, url)
+        return False
+
+    def star_repository(self, owner, repo):
+        """Star *owner/repo* (PUT /user/starred/{owner}/{repo}).
+
+        Returns True on 204.  Idempotent: already-starred repos also
+        answer 204.  Used by the reciprocal-action worker (#24).
+        """
+        url = f"/user/starred/{owner}/{repo}"
+        try:
+            r = requests.put(
+                f"{API}{url}",
+                headers=HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+        except requests.exceptions.RequestException as e:
+            log.warning("Network error starring %s/%s: %s", owner, repo, e)
+            raise GitHubNetworkError(url, original_exception=e) from e
+        record_api_request(url, r.status_code)
+        if r.status_code == 204:
+            return True
+        if r.status_code == 404:
+            log.warning("Star target %s/%s not found — skipping", owner, repo)
+            return False
+        if r.status_code == 401:
+            raise GitHubAuthError(401, url, r)
+        if r.status_code in (403, 429):
+            raise GitHubRateLimitError(
+                r.status_code, url, r,
+                retry_after=_parse_int(r.headers.get("Retry-After")),
+                reset_at=_parse_int(r.headers.get("X-RateLimit-Reset")),
+                remaining=_parse_int(r.headers.get("X-RateLimit-Remaining")),
+            )
+        if r.status_code >= 500:
+            # Transient server failure — must never be read as "we didn't
+            # star them" (the reciprocal worker would skip the star without
+            # a retry); surface it as a network error like does_user_follow_us.
+            log.warning(
+                "GitHub HTTP %s for %s — treating as network error",
+                r.status_code, url,
+            )
+            raise GitHubNetworkError(
+                url, original_exception=ValueError(f"HTTP {r.status_code}")
+            )
+        log.warning("Star %s/%s failed with HTTP %s", owner, repo, r.status_code)
         return False
 
     def unfollow(self, username):
