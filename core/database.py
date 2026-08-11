@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from core.config import (
     DATABASE,
     CURRENT_SCORE_VERSION,
+    ML_FOLLOW_GATE_ENABLED,
+    ML_FOLLOW_THRESHOLD,
     REPO_FRESHNESS_DAYS,
     SCORE_FRESHNESS_DAYS,
     SILENT_REPO_CHECK_FRESHNESS_DAYS,
@@ -59,6 +61,109 @@ class Database:
         self.conn.commit()
 
     # --------------------------------------------------
+    # Worker status — dashboard toggle + liveness per worker
+    # --------------------------------------------------
+    # One row per background worker (workers/*.py).  ``enabled`` is the
+    # Management-tab pause/resume toggle; started/stopped/last action/last
+    # error/heartbeat drive the worker-activity card.  All methods degrade
+    # gracefully when the worker_status table does not exist yet (migrations
+    # not applied): status writes become no-ops and ``worker_enabled``
+    # defaults to True, so the bot never breaks on an un-migrated database.
+
+    def _worker_status_cols(self):
+        """Column names of worker_status (schema sync like _job_row_to_dict).
+
+        Only the *found* result is cached — a process that starts before
+        the migration runs re-checks on every call (a cheap sqlite_master
+        lookup) and picks the table up as soon as it exists.
+        """
+        if not hasattr(self, "_worker_status_columns"):
+            self._worker_status_columns = None
+        if self._worker_status_columns is None and self._table_exists("worker_status"):
+            self._worker_status_columns = [
+                r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(worker_status)"
+                ).fetchall()
+            ]
+        return self._worker_status_columns
+
+    def _update_worker_status(self, key, **fields):
+        """Upsert worker *key*'s row setting the given columns.
+
+        No-op when the worker_status table does not exist (pre-migration),
+        so workers and the API keep working on older databases.
+        """
+        if not self._worker_status_cols():
+            return
+        cols = ", ".join(fields)
+        placeholders = ", ".join("?" for _ in fields)
+        updates = ", ".join(f"{c} = excluded.{c}" for c in fields)
+        self.conn.execute(
+            f"INSERT INTO worker_status (name, {cols}) VALUES (?, {placeholders}) "
+            f"ON CONFLICT(name) DO UPDATE SET {updates}",
+            (key, *fields.values()),
+        )
+        self.conn.commit()
+
+    def worker_enabled(self, key, default=True):
+        """True when worker *key* is toggled on (default when table/row missing)."""
+        if not self._worker_status_cols():
+            return default
+        row = self.conn.execute(
+            "SELECT enabled FROM worker_status WHERE name = ?", (key,),
+        ).fetchone()
+        return bool(row[0]) if row else default
+
+    def set_worker_enabled(self, key, enabled):
+        """Persist the Management-tab toggle for worker *key*."""
+        self._update_worker_status(key, enabled=1 if enabled else 0)
+
+    def mark_worker_started(self, key):
+        """Record that worker *key* just started (clears the stopped marker)."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(
+            key, started_at=now, stopped_at=None, heartbeat_at=now,
+        )
+
+    def mark_worker_stopped(self, key):
+        """Record that worker *key* stopped cleanly (heartbeat cleared → offline)."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(key, stopped_at=now, heartbeat_at=None)
+
+    def mark_worker_action(self, key):
+        """Record that worker *key* just completed a unit of work."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(key, last_action_at=now)
+
+    def mark_worker_error(self, key, error):
+        """Record the last error of worker *key* (message + timestamp)."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(key, last_error_at=now, last_error=error)
+
+    def touch_worker_heartbeat(self, key):
+        """Record a liveness tick for worker *key*."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._update_worker_status(key, heartbeat_at=now)
+
+    def worker_status(self, key):
+        """Return worker *key*'s row as a dict, or {} when absent."""
+        cols = self._worker_status_cols()
+        if not cols:
+            return {}
+        row = self.conn.execute(
+            "SELECT * FROM worker_status WHERE name = ?", (key,),
+        ).fetchone()
+        return dict(zip(cols, row)) if row else {}
+
+    def worker_statuses(self):
+        """Return all worker_status rows as dicts (empty pre-migration)."""
+        cols = self._worker_status_cols()
+        if not cols:
+            return []
+        rows = self.conn.execute("SELECT * FROM worker_status").fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+
+    # --------------------------------------------------
     # Users
     # --------------------------------------------------
 
@@ -94,6 +199,23 @@ class Database:
             "SELECT username FROM users WHERE owner = 1"
         ).fetchone()
         return row[0] if row else None
+
+    def owner_repository_names(self):
+        """Return the owner's repository *short* names (from ``repositories``).
+
+        Used by the unfollow worker to decide whether a user interacted
+        with any of the owner's repos (GitHub events carry ``owner/repo``
+        full names, built from these).  Empty when the owner has no repos
+        collected yet — callers fall back to a live API fetch.
+        """
+        owner = self.get_owner()
+        if not owner:
+            return []
+        rows = self.conn.execute(
+            "SELECT name FROM repositories WHERE user_id = ?",
+            (owner,),
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def store_full_profile(self, username, api_data):
         """Cache the full GitHub API user response as JSON.
@@ -138,9 +260,9 @@ class Database:
 
     def top_users(self, limit):
         # NULL scores (users without collected repos) are excluded — they
-        # carry no meaningful ranking and ``--follow`` logs them via %d.
-        # "Current status = NEW" (no lifecycle transition yet) is derived
-        # from user_status_history — the single store of statuses.
+        # carry no meaningful ranking.  "Current status = NEW" (no
+        # lifecycle transition yet) is derived from user_status_history —
+        # the single store of statuses.
         rows = self.conn.execute(
             """
             SELECT u.username, u.score
@@ -430,13 +552,87 @@ class Database:
         self.conn.commit()
 
     def mark_deleted(self, username):
-        """Mark *username* as DELETED (GitHub account no longer exists).
+        """Soft-delete *username* (GitHub account no longer exists).
+
+        The ``users`` row is kept — status history and the activity feed
+        must stay intact — but the account's footprint is stripped so a
+        deleted user can never be scored, followed, trained on or shown
+        with live-looking data:
+
+          * score / public_repos / followers / followers_count → 0,
+          * bio / company → NULL, ``scored_at`` → now,
+          * ML prediction → NULL,
+          * repositories (and their languages/topics links) and company
+            links are removed,
+          * the cached GitHub profile JSON keeps its static fields
+            (avatar, name, location, …) but its mutable counts
+            (followers / following / public_repos) are zeroed.
 
         Logs a DELETED event on the first transition so the activity feed
         shows account deletions without repeating them on later runs.
+        Idempotent — safe to call again on an already-deleted user.
         """
         if self._append_status(username, "DELETED"):
             self._log_action(username, "DELETED")
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Sanitize the cached profile: zero the mutable counts while
+        # keeping static fields (avatar, name, location, …) so the
+        # dashboard can still render the row without stale numbers.
+        row = self.conn.execute(
+            "SELECT github_profile_json FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if row and row[0]:
+            try:
+                data = json.loads(row[0])
+                if isinstance(data, dict):
+                    for key in ("followers", "following", "public_repos"):
+                        data[key] = 0
+                    self.conn.execute(
+                        "UPDATE users SET github_profile_json = ? WHERE username = ?",
+                        (json.dumps(data, ensure_ascii=False), username),
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass  # corrupt cache — nothing left to sanitize
+
+        self.conn.execute(
+            """
+            UPDATE users SET
+                score        = 0,
+                public_repos = 0,
+                followers    = 0,
+                followers_count = 0,
+                bio          = NULL,
+                company      = NULL,
+                scored_at    = ?,
+                ml_follow_prediction = NULL
+            WHERE username = ?
+            """,
+            (now, username),
+        )
+
+        # Strip repositories together with their language/topic links
+        # (no ON DELETE CASCADE between these tables) and company links.
+        # Subquery IN keeps one statement per table and is immune to
+        # SQLite's placeholder-count limit even for very repo-heavy users.
+        self.conn.execute(
+            "DELETE FROM repository_languages WHERE repository_id IN "
+            "(SELECT id FROM repositories WHERE user_id = ?)",
+            (username,),
+        )
+        self.conn.execute(
+            "DELETE FROM repository_topics WHERE repository_id IN "
+            "(SELECT id FROM repositories WHERE user_id = ?)",
+            (username,),
+        )
+        self.conn.execute(
+            "DELETE FROM repositories WHERE user_id = ?", (username,),
+        )
+        self.conn.execute(
+            "DELETE FROM user_companies WHERE username = ?", (username,),
+        )
         self.conn.commit()
 
     # --------------------------------------------------
@@ -800,6 +996,42 @@ class Database:
             SELECT COUNT(*)
             FROM actions
             WHERE action = 'FOLLOW'
+              AND created_at >= ?
+            """,
+            (since,),
+        ).fetchone()[0]
+
+    def today_unfollows(self):
+        """Count UNFOLLOW events since the start of the local day.
+
+        Mirrors :meth:`today_follows` — the active-unfollow worker logs an
+        UNFOLLOW event per unfollow, so the shared daily budget can count
+        both directions.
+        """
+        since = local_midnight_utc(self).isoformat()
+        return self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM actions
+            WHERE action = 'UNFOLLOW'
+              AND created_at >= ?
+            """,
+            (since,),
+        ).fetchone()[0]
+
+    def today_social_actions(self):
+        """Count today's follows + unfollows (the shared daily budget).
+
+        The daily follow limit is a combined cap: follows (FollowWorker)
+        and unfollows (UnfollowWorker) draw from the same 50-action pool,
+        so both workers must check this — never ``today_follows`` alone.
+        """
+        since = local_midnight_utc(self).isoformat()
+        return self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM actions
+            WHERE action IN ('FOLLOW', 'UNFOLLOW')
               AND created_at >= ?
             """,
             (since,),
@@ -1200,10 +1432,12 @@ class Database:
         self.conn.commit()
 
     def get_next_queued_user(self, threshold):
-        """Return the earliest NEW user with score >= threshold (FIFO).
+        """Return the highest-scored NEW user with score >= *threshold*.
 
-        Ordered by ``created_at ASC`` so the user who entered the system
-        first gets followed first.  Returns ``(username, score)`` or None.
+        Ordered by ``score DESC`` so the best candidate is subscribed to
+        first, tie-broken by ``created_at ASC`` (equally-scored users in
+        the order they entered the system).  Returns ``(username, score)``
+        or None.  Deleted users are excluded by the ``NEW`` status filter.
         """
         row = self.conn.execute(
             """
@@ -1211,12 +1445,47 @@ class Database:
             LEFT JOIN user_current_status c ON c.username = u.username
             WHERE COALESCE(c.status, 'NEW') = 'NEW'
               AND u.score >= ?
-            ORDER BY u.created_at ASC
+            ORDER BY u.score DESC, u.created_at ASC
             LIMIT 1
             """,
             (threshold,),
         ).fetchone()
         return row
+
+    def get_unfollow_candidates(self, min_age_days=7):
+        """Return a random user eligible for an inactive-unfollow, or None.
+
+        Eligible = current status FOLLOWED (we follow them, they never
+        followed back) and followed more than *min_age_days* ago.  Random
+        selection rotates through the pool so a single candidate that is
+        re-checked (e.g. one who did interact) isn't hit every cycle.
+
+        The caller re-verifies everything against the live GitHub API
+        before actually unfollowing (status can change in between).
+        """
+        row = self.conn.execute(
+            """
+            SELECT c.username
+            FROM user_current_status c
+            JOIN users u ON u.username = c.username
+            WHERE u.owner = 0
+              AND c.status = 'FOLLOWED'
+              AND c.followed_at IS NOT NULL
+              AND c.followed_at <= datetime('now', ?)
+            ORDER BY RANDOM()
+            LIMIT 1
+            """,
+            (f"-{min_age_days} days",),
+        ).fetchone()
+        return row[0] if row else None
+
+    def current_status(self, username):
+        """Return *username*'s current lifecycle status ('NEW' when none yet)."""
+        row = self.conn.execute(
+            "SELECT status FROM user_current_status WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else "NEW"
 
     def get_mutual_follow_users(self):
         """Return usernames for all confirmed mutual-follow users (FOLLOWBACK).
@@ -1248,6 +1517,20 @@ class Database:
         """
         if self._append_status(username, "UNFOLLOWED_AFTER_MUTUAL_FOLLOW"):
             self._log_action(username, "UNFOLLOWED")
+        self.conn.commit()
+
+    def mark_unfollowed_no_interaction(self, username):
+        """Mark *username* as unfollowed for never interacting with us.
+
+        The UnfollowWorker calls this after successfully unfollowing a
+        user who was followed 7+ days, never followed us back, and never
+        interacted with the owner's profile or repos.  Appends an
+        UNFOLLOWED_NO_INTERACTION transition and logs an UNFOLLOW event
+        (once per user) so the activity feed and the shared daily-budget
+        counter (``today_unfollows``) reflect it.
+        """
+        if self._append_status(username, "UNFOLLOWED_NO_INTERACTION"):
+            self._log_action(username, "UNFOLLOW")
         self.conn.commit()
 
     def get_user_companies(self, username):
@@ -1294,8 +1577,11 @@ class Database:
             any user who reciprocated is label=1.
           * label=0 — user was followed by us more than 7 days ago and
             never followed back (current status FOLLOWED with the FOLLOWED
-            transition older than 7 days).  The 7-day observation window
-            applies to the negative class only.
+            transition older than 7 days), plus users we actively
+            unfollowed for inactivity (UNFOLLOWED_NO_INTERACTION — they
+            never followed back either; keeping them labelled preserves
+            the negative pool as the unfollow worker cleans up).  The
+            7-day observation window applies to the negative class only.
 
         Only includes users who have been scored and have repo data.
 
@@ -1318,6 +1604,7 @@ class Database:
                     AND c.changed_at < datetime('now', '-7 days')
                 )
                 OR c.status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'
+                OR c.status = 'UNFOLLOWED_NO_INTERACTION'
             )
             AND u.score IS NOT NULL
             AND u.score > 0
@@ -1438,6 +1725,50 @@ class Database:
             (prediction, username),
         )
         self.conn.commit()
+
+    def ml_prediction(self, username):
+        """Return the stored ML prediction (0 or 1) for *username*, or None."""
+        row = self.conn.execute(
+            "SELECT ml_follow_prediction FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else None
+
+    # --------------------------------------------------
+    # ML follow gate — runtime "strictness" settings
+    # --------------------------------------------------
+    # The gate is controlled from the Management tab (no restart): the
+    # master switch and the decision threshold live in the settings table,
+    # seeded by the ML_FOLLOW_* config defaults on a fresh install.
+
+    def get_ml_follow_threshold(self):
+        """Effective ML follow threshold (0–1), from settings or config."""
+        raw = self.get_setting("ml_follow_threshold")
+        if raw is None:
+            return ML_FOLLOW_THRESHOLD
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return ML_FOLLOW_THRESHOLD
+
+    def get_ml_follow_gate_enabled(self):
+        """True when the FollowWorker's ML gate is on (settings or config)."""
+        raw = self.get_setting("ml_follow_gate_enabled")
+        if raw is None:
+            return ML_FOLLOW_GATE_ENABLED
+        return str(raw).lower() in ("1", "true", "yes")
+
+    def set_ml_follow_config(self, gate_enabled=None, threshold=None):
+        """Persist the Management-tab gate switch / threshold.
+
+        Accepts None for either field (only the given one is written).
+        Stored as strings (settings is a key/value text table).
+        """
+        if gate_enabled is not None:
+            self.set_setting("ml_follow_gate_enabled", "1" if gate_enabled else "0")
+        if threshold is not None:
+            self.set_setting("ml_follow_threshold", str(round(float(threshold), 4)))
+
 
     # --------------------------------------------------
     # ML training-run history (dashboard ML tab)

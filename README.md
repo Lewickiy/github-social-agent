@@ -83,9 +83,10 @@ Simply "switch it on" once — and watch your GitHub network grow in a targeted,
 
 ## Key Features
 
-- **A single working mode `--silent`** — a self-sustaining daemon: waits for the first followers, syncs the owner's profile, collects data, scores, follows, retrains the model, and grows on its own. It does not stop after the first batch.
+- **A single working mode `--silent`** — a self-sustaining daemon: waits for the first followers, syncs the owner's profile, collects data, scores (follows are handled by the dedicated FollowWorker), retrains the model, and grows on its own. It does not stop after the first batch.
 - **First-run gates** — on a brand-new account it does not silently finish with "0 users" but patiently waits for the first followers and the owner's data.
 - **Parallel processing** — up to `SILENT_WORKERS` threads (2 by default) split the user queue, speeding up processing several times while keeping pauses between actions.
+- **Dedicated follow worker** — the system's *only* follower: a separate daemon thread (`workers/follow_worker.py`) subscribes to candidates by score (highest first, ≥ threshold) with a random 20–30 min pause between subscriptions, within the daily limit. The queue is re-read fresh before every follow and deleted users are skipped; when no qualifying candidates exist the worker simply waits for new scored users.
 - **Calm graph-growth worker** — a separate background thread walks the follower graph with a fixed budget of ≤ 500 requests/hour without disturbing the main processing.
 - **0-100 scoring by similarity to your stack** — languages (histogram intersection), topics (Jaccard index), repository freshness.
 - **ML follow-back prediction (shadow mode)** — an experimental PyTorch model that learns from historical follow-back data and evaluates its predictions on live data. The model currently operates in shadow mode: it does not influence production decisions, which are still fully controlled by the deterministic scoring algorithm.
@@ -96,7 +97,7 @@ Simply "switch it on" once — and watch your GitHub network grow in a targeted,
 - **Daily snapshots** — at midnight in the user's timezone, followers / following / public repos are recorded for growth charts.
 - **Company enrichment** — `@org` mentions from the `company` field become organization profiles.
 - **Web dashboard** — 4 pages: analytics, candidates, ML, management.
-- **Job launching from the dashboard** — any bot mode starts with one click, with history, logs, and statuses.
+- **Worker control from the dashboard** — every background worker can be paused/resumed with a switch; per-worker lifecycle (started, stopped, last action, last error) is shown live.
 - **Docker deployment** — bot + dashboard in `docker-compose`; data and models survive rebuilds.
 
 ---
@@ -132,7 +133,7 @@ flowchart LR
 
 3. **Deterministic scoring.** Every candidate receives a transparent 0–100 score based on profile quality and similarity to the owner's technology stack. This score is currently the production decision engine used for automatic following.
 
-4. **Following.** Candidates whose score exceeds the configured threshold are followed automatically. Human-like delays, daily limits, cooldowns, and GitHub rate-limit handling ensure safe long-running operation.
+4. **Following.** The dedicated `FollowWorker` thread is the only follower in the system. It subscribes to candidates by score — highest first, never below the threshold — with a random 20–30 minute pause between subscriptions, within the daily limit. The queue is re-read fresh before every follow, deleted users are skipped, and when no qualifying candidates exist it simply waits for new scored users. Cooldowns and GitHub rate-limit handling ensure safe long-running operation.
 
 5. **ML training and evaluation.** Independently from the production pipeline, the system continuously learns from historical followback outcomes. The PyTorch model is retrained on startup and every 24 hours, after which followback probabilities are recomputed for every candidate and stored for analysis.
 
@@ -173,8 +174,8 @@ The dashboard is the system's "command center," styled after GitHub: a dark head
 
 ### Management
 
-- **Job launcher** — buttons for all bot modes: `silent` (main) and the "force/backfill" modes. A job runs as a background process; its status is visible in real time.
-- **Job history** — statuses (PENDING / RUNNING / SUCCESS / FAILED), duration, exit code, **log viewer** for each run.
+- **Workers** — switches for all six background daemon threads (follow, graph discovery, ML trainer, companies, followback check, snapshots). All are **active by default**; toggling one off pauses it and back on resumes it — no restart needed, the change applies on the worker's next cycle.
+- **Worker activity** — per-worker lifecycle from the `worker_status` table: when the worker started, stopped, last completed an action, and last hit an error (with the error message).
 - **Bot configuration** — current settings: follow limit, score threshold, freshness TTLs, ML retrain interval, etc.
 - **Timezone** — auto-detected from the browser; day boundaries depend on it (daily limit reset, midnight snapshots).
 - **Refresh interval** — a slider for the auto-refresh cadence of all pages.
@@ -214,7 +215,7 @@ The dashboard is the system's "command center," styled after GitHub: a dark head
 .
 ├── main.py                 # CLI entry point: all bot modes (--silent, --score, ...)
 ├── core/                   # Infrastructure: config, logger, database (SQLite), github_client, tz
-├── services/               # Bot logic: collector, scorer, silent, follow_engine
+├── services/               # Bot logic: collector, scorer, silent
 ├── workers/                # Background threads: graph growth, ML trainer, followback, companies, snapshots
 ├── ml_service/             # ML: features, model (PyTorch), trainer, inference, evaluate, recompute
 ├── api/                    # FastAPI dashboard: /api/*, job launching, serving the built frontend
@@ -242,8 +243,8 @@ The dashboard is the system's "command center," styled after GitHub: a dark head
 ### Step 1. Clone and install
 
 ```bash
-git clone https://github.com/Lewickiy/github-follow-master.git
-cd github-follow-master
+git clone https://github.com/Lewickiy/github-social-agent.git
+cd github-social-agent
 
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
@@ -356,7 +357,6 @@ docker compose run --rm github-bot --migrate
 | `--collect` | Both phases: discovery + repository collection |
 | `--collect-self` | Force-refresh your own (owner) profile — the scoring baseline |
 | `--score` | Score / re-score all users |
-| `--follow` | Follow the top-scored users (respecting the daily limit) |
 
 ### Utilities
 
@@ -395,10 +395,14 @@ python -m ml_service.evaluate --new-sample 300  # model quality diagnostics
 |---|---|---|
 | `MY_USERNAME` | `Lewickiy` | Your GitHub login (the owner — the scoring baseline) |
 | `DAILY_FOLLOW_LIMIT` | `50` | Maximum follows per day |
-| `FOLLOW_DELAY` | `60` | Pause between follows (seconds) |
+| `FOLLOW_INTERVAL_MIN_SECONDS` | `1200` | Minimum random pause between follows (20 min) |
+| `FOLLOW_INTERVAL_MAX_SECONDS` | `1800` | Maximum random pause between follows (30 min) |
 | `SILENT_FOLLOW_SCORE_THRESHOLD` | `35` | Minimum score for auto-following |
 | `SILENT_WORKERS` | `2` | Parallel silent-mode threads |
+| `FOLLOW_WORKER_ENABLED` | `True` | Fresh-install default of the Follow worker toggle (runtime control: Management → Workers) |
+| `FOLLOW_WORKER_POLL_INTERVAL_SECONDS` | `60` | How often the follow worker re-checks the queue when idle |
 | `SILENT_CONTINUOUS` | `True` | Continuous mode (don't exit after the queue) |
+| `DISCOVERY_WORKER_ENABLED` | `True` | Fresh-install default of the Graph-discovery worker toggle |
 | `DISCOVERY_RATE_LIMIT_PER_HOUR` | `500` | Hourly request budget of the graph-growth worker |
 | `DISCOVERY_PASS_MAX_USERS` | `500` | Users per graph-growth pass |
 | `ML_ENABLED` | `True` | Enable ML predictions |
@@ -488,6 +492,7 @@ SQLite database (`data/github_social.db`, WAL mode). In Docker the whole `./data
 | `ml_training_runs` | ML model retrain history |
 | `discovery_runs` | Graph-growth worker pass history |
 | `settings` | User settings (e.g., timezone) |
+| `worker_status` | Per-worker toggle + lifecycle (started/stopped/action/error/heartbeat) |
 | `migrations` | Applied-migration tracking |
 
 **Migrations:**

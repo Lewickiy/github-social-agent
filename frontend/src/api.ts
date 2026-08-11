@@ -1,13 +1,14 @@
 import type {
   Config,
   DiscoveryState,
-  JobsResponse,
   LanguageOption,
   MLState,
   Settings,
   Stats,
   UserProfile,
   UsersResponse,
+  WorkersResponse,
+  WorkerStatus,
 } from "./types";
 
 const BASE = "/api";
@@ -17,19 +18,6 @@ async function get<T>(path: string): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(body?.detail ?? `HTTP ${res.status}`);
-  }
-  return res.json() as Promise<T>;
-}
-
-async function post<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(BASE + path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const b = await res.json().catch(() => null);
-    throw new Error(b?.detail ?? `HTTP ${res.status}`);
   }
   return res.json() as Promise<T>;
 }
@@ -78,9 +66,12 @@ export const api = {
   config: () => get<Config>("/config"),
   settings: () => get<Settings>("/settings"),
   saveSettings: (timezone: string) => put<Settings>("/settings", { timezone }),
-  jobs: () => get<JobsResponse>("/jobs"),
-  startJob: (mode: string) => post<unknown>("/jobs", { mode }),
-  jobLog: (id: number) => get<{ log: string }>(`/jobs/${id}/log`),
+  /** Toggle / tune the ML follow gate (applies immediately, no restart). */
+  saveMLFollowConfig: (cfg: { enabled?: boolean; threshold?: number }) =>
+    put<{ enabled: boolean; threshold: number }>("/config/ml-follow", cfg),
+  workers: () => get<WorkersResponse>("/workers"),
+  setWorkerEnabled: (key: string, enabled: boolean) =>
+    put<WorkerStatus>(`/workers/${encodeURIComponent(key)}`, { enabled }),
 };
 
 export function formatDate(iso: string | null | undefined): string {

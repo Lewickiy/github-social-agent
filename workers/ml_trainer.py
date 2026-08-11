@@ -16,7 +16,6 @@ Usage in main.py::
 """
 
 import threading
-import time
 
 from core.config import (
     ML_ENABLED,
@@ -24,8 +23,19 @@ from core.config import (
     ML_TRAIN_INTERVAL_HOURS,
 )
 from core.logger import get_logger
+from workers.runtime import (
+    is_enabled,
+    mark_action,
+    mark_started,
+    mark_stopped,
+    sleep_interruptible,
+    wait_until_enabled,
+)
 
 log = get_logger(__name__)
+
+# Key of this worker in the worker_status table (dashboard toggle/status).
+WORKER_KEY = "ml_trainer"
 
 
 class MLTrainerWorker(threading.Thread):
@@ -70,53 +80,66 @@ class MLTrainerWorker(threading.Thread):
             "ML trainer worker started (interval=%dh, enabled=%s)",
             ML_TRAIN_INTERVAL_HOURS, ML_ENABLED,
         )
+        mark_started(db, WORKER_KEY)
 
-        if not ML_ENABLED:
-            log.info("ML is disabled — trainer worker idle.")
-            # Still sleep interruptibly until shutdown
+        try:
+            if not ML_ENABLED:
+                log.info("ML is disabled — trainer worker idle.")
+                # Still sleep interruptibly until shutdown
+                while not self._shutdown.is_set():
+                    if not sleep_interruptible(
+                        self._shutdown, 5, db=db, key=WORKER_KEY,
+                    ):
+                        break
+                return
+
+            # ── Initial training (if configured) ──
+            if self._train_after_start and is_enabled(db, WORKER_KEY):
+                log.info("ML: running initial training cycle ...")
+                try:
+                    metadata = self._train(db)
+                    if metadata is not None:
+                        self._recompute_predictions_async(
+                            metadata["version"], metadata.get("run_id"),
+                        )
+                except Exception:
+                    log.exception("ML initial training failed")
+                mark_action(db, WORKER_KEY)
+
+            # ── Periodic re-training ──
             while not self._shutdown.is_set():
-                time.sleep(5)
+                if not is_enabled(db, WORKER_KEY):
+                    log.info("ML trainer paused — waiting for enable")
+                    if not wait_until_enabled(db, WORKER_KEY, self._shutdown):
+                        break
+                    continue
+
+                if not sleep_interruptible(
+                    self._shutdown, self._interval, db=db, key=WORKER_KEY,
+                ):
+                    break
+                if self._shutdown.is_set():
+                    break
+
+                log.info("ML: starting scheduled training cycle ...")
+                try:
+                    metadata = self._train(db)
+                    if metadata is not None:
+                        self._recompute_predictions_async(
+                            metadata["version"], metadata.get("run_id"),
+                        )
+                except Exception:
+                    log.exception("ML training cycle failed")
+                mark_action(db, WORKER_KEY)
+        finally:
+            mark_stopped(db, WORKER_KEY)
             db.conn.close()
-            return
-
-        # ── Initial training (if configured) ──
-        if self._train_after_start:
-            log.info("ML: running initial training cycle ...")
-            try:
-                metadata = self._train(db)
-                if metadata is not None:
-                    self._recompute_predictions_async(
-                        metadata["version"], metadata.get("run_id"),
-                    )
-            except Exception:
-                log.exception("ML initial training failed")
-
-        # ── Periodic re-training ──
-        while not self._shutdown.is_set():
-            deadline = time.monotonic() + self._interval
-            while time.monotonic() < deadline and not self._shutdown.is_set():
-                time.sleep(1)
-
-            if self._shutdown.is_set():
-                break
-
-            log.info("ML: starting scheduled training cycle ...")
-            try:
-                metadata = self._train(db)
-                if metadata is not None:
-                    self._recompute_predictions_async(
-                        metadata["version"], metadata.get("run_id"),
-                    )
-            except Exception:
-                log.exception("ML training cycle failed")
-
-        db.conn.close()
-        # Wait for an in-flight recompute to finish before the process exits
-        # — daemon threads holding torch must not be killed mid-run.
-        if self._recompute_thread is not None and self._recompute_thread.is_alive():
-            log.info("ML: waiting for background recompute to finish ...")
-            self._recompute_thread.join(timeout=120)
-        log.info("ML trainer worker stopped.")
+            # Wait for an in-flight recompute to finish before the process exits
+            # — daemon threads holding torch must not be killed mid-run.
+            if self._recompute_thread is not None and self._recompute_thread.is_alive():
+                log.info("ML: waiting for background recompute to finish ...")
+                self._recompute_thread.join(timeout=120)
+            log.info("ML trainer worker stopped.")
 
     # ------------------------------------------------------------------
     # Internal helpers

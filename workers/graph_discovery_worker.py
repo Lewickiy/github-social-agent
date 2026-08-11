@@ -9,9 +9,10 @@ quietly adds new users to the queue.
 Rate control: each pass walks at most ``DISCOVERY_PASS_MAX_USERS`` users
 (~1 profile request each, plus one followers request *per page* when
 their count grew), paced to at most ``DISCOVERY_RATE_LIMIT_PER_HOUR``
-requests/hour.  A pass is sized to one hour's budget, so the worker runs
-exactly one pass per hour — and if a pass finishes early it sleeps out
-the rest of the hour, so the hourly budget is never exceeded.
+requests/hour.  The pacing is per user, so a pass can legitimately span
+several hours — the *sustained* request rate, not the pass total, is
+what stays within the hourly budget.  After a pass the worker sleeps out
+the rest of its hour window before starting the next one.
 
 Usage in main.py::
 
@@ -29,8 +30,21 @@ from core.config import (
     DISCOVERY_RATE_LIMIT_PER_HOUR,
 )
 from core.logger import get_logger
+from workers.runtime import (
+    is_enabled,
+    mark_action,
+    mark_error,
+    mark_started,
+    mark_stopped,
+    sleep_interruptible,
+    touch_heartbeat,
+    wait_until_enabled,
+)
 
 log = get_logger(__name__)
+
+# Key of this worker in the worker_status table (dashboard toggle/status).
+WORKER_KEY = "graph_discovery"
 
 # One hourly budget window in seconds.
 _HOUR_SECONDS = 3600
@@ -119,24 +133,62 @@ class GraphDiscoveryWorker(threading.Thread):
             "%.1fs pacing).",
             self._rate_per_hour, self._pass_max_users, delay,
         )
+        mark_started(db, WORKER_KEY)
 
-        while not self._shutdown.is_set():
-            # One hourly budget window: a pass sized to the budget, then
-            # sleep out the remainder of the hour so the rate never
-            # exceeds DISCOVERY_RATE_LIMIT_PER_HOUR even when the pass
-            # finished early (e.g. fewer eligible users than the cap).
-            start = time.monotonic()
-            try:
-                self._run_pass(db, github, delay)
-            except Exception:
-                log.exception("Graph discovery worker error")
+        try:
+            while not self._shutdown.is_set():
+                if not is_enabled(db, WORKER_KEY):
+                    log.info("Graph discovery worker paused — waiting for enable")
+                    if not wait_until_enabled(db, WORKER_KEY, self._shutdown):
+                        break
+                    continue
 
-            deadline = start + _HOUR_SECONDS
-            while time.monotonic() < deadline and not self._shutdown.is_set():
-                time.sleep(1)
+                # One hourly budget window: a pass sized to the budget, then
+                # sleep out the remainder of the hour so the rate never
+                # exceeds DISCOVERY_RATE_LIMIT_PER_HOUR even when the pass
+                # finished early (e.g. fewer eligible users than the cap).
+                start = time.monotonic()
+                try:
+                    self._run_pass(db, github, delay)
+                    mark_action(db, WORKER_KEY)
+                except Exception as exc:
+                    mark_error(
+                        db, WORKER_KEY, f"{type(exc).__name__}: {exc}",
+                    )
+                    log.exception("Graph discovery worker error")
 
-        db.conn.close()
-        log.info("Graph discovery worker stopped.")
+                remaining = start + _HOUR_SECONDS - time.monotonic()
+                if not sleep_interruptible(
+                    self._shutdown, max(0.0, remaining),
+                    db=db, key=WORKER_KEY,
+                ):
+                    break
+        finally:
+            mark_stopped(db, WORKER_KEY)
+            db.conn.close()
+            log.info("Graph discovery worker stopped.")
+
+    def _heartbeat_loop(self, stop_event):
+        """Keep the dashboard's "Running" state honest during a pass.
+
+        ``_run_pass`` spends hours in plain ``time.sleep`` calls inside
+        the collector, so without this companion thread the worker_status
+        heartbeat would go stale within 5 minutes and the UI would show
+        the worker as offline while it is actually working.
+
+        Uses its own Database connection — SQLite connections are not
+        thread-safe, and the main worker thread is writing through the
+        shared ``db`` for the whole pass.
+        """
+        from core.database import Database
+
+        hb_db = Database()
+        try:
+            while not stop_event.is_set():
+                touch_heartbeat(hb_db, WORKER_KEY)
+                time.sleep(30)
+        finally:
+            hb_db.conn.close()
 
     def _run_pass(self, db, github, delay):
         """Walk one bounded slice of the follower graph and record it.
@@ -147,6 +199,18 @@ class GraphDiscoveryWorker(threading.Thread):
         against ``DISCOVERY_RATE_LIMIT_PER_HOUR``.
         """
         from services.collector import Collector
+
+        # Heartbeat companion: the pass sleeps with plain time.sleep()
+        # inside the collector, so a daemon thread keeps touching the
+        # worker_status heartbeat (→ dashboard "Running").
+        stop_heartbeat = threading.Event()
+        heartbeat = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(stop_heartbeat,),
+            daemon=True,
+            name="GraphDiscoveryHeartbeat",
+        )
+        heartbeat.start()
 
         counter = _RequestCounter(github)
         collector = Collector(db, counter, shutdown_event=self._shutdown)
@@ -160,6 +224,8 @@ class GraphDiscoveryWorker(threading.Thread):
                 stats=stats,
             )
         finally:
+            stop_heartbeat.set()
+            heartbeat.join(timeout=5)
             duration = time.monotonic() - start
             db.record_discovery_run(
                 {

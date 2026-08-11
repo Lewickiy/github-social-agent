@@ -15,7 +15,9 @@ NULL`` **and** ``github_profile_json IS NOT NULL``.  Users without a full
 profile (the pre-2026-07-31 scoring pass) would otherwise feed a
 zero-filled vector — the exact data artifact documented in
 ``new_ml_model_analyse.md`` — so they are intentionally skipped and their
-prediction is left untouched.
+prediction is left untouched.  Soft-deleted users (current status
+DELETED) are excluded as well — they are gone from GitHub and must not
+be re-predicted.
 
 No GitHub API calls are made — feature vectors are built entirely from
 the DB (profile JSON, repo aggregates, languages, topics).
@@ -87,6 +89,9 @@ def recompute_all_predictions(db, batch=DEFAULT_BATCH, limit=None, verbose=False
         WHERE owner = 0
           AND repos_fetched_at IS NOT NULL
           AND github_profile_json IS NOT NULL
+          AND username NOT IN (
+              SELECT username FROM user_current_status WHERE status = 'DELETED'
+          )
         ORDER BY username
         """
     ).fetchall()
@@ -108,6 +113,11 @@ def recompute_all_predictions(db, batch=DEFAULT_BATCH, limit=None, verbose=False
     top_topics = [(name, 0) for name in metadata["top_topics"]]
     feature_order = metadata["feature_order"]
 
+    # The stored 0/1 must reflect the *current* ML follow threshold (the
+    # Management-tab strictness dial), so the FollowWorker gate and the
+    # dashboard "ML candidates" stat stay consistent with it.
+    threshold = db.get_ml_follow_threshold()
+
     model.eval()
     pred_1 = 0
     pred_0 = 0
@@ -127,7 +137,7 @@ def recompute_all_predictions(db, batch=DEFAULT_BATCH, limit=None, verbose=False
                 top_langs, top_topics, feature_order,
             )
             tensor = torch.tensor([vec], dtype=torch.float32)
-            pred = int(model.predict(tensor).item())
+            pred = int(model.predict(tensor, threshold=threshold).item())
             updates.append((pred, username))
 
             if pred == 1:

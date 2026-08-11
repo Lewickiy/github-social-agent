@@ -26,18 +26,6 @@ export interface RecentAction {
   created_at: string;
 }
 
-export interface Job {
-  id: number;
-  mode: string;
-  status: "PENDING" | "RUNNING" | "SUCCESS" | "FAILED";
-  pid: number | null;
-  started_at: string | null;
-  finished_at: string | null;
-  exit_code: number | null;
-  error: string | null;
-  created_at: string | null;
-}
-
 export interface GitHubUsage {
   requests_last_hour: number;
   /** Requests within the selected Overview interval (null when not scoped). */
@@ -58,10 +46,16 @@ export interface Stats {
     followed: number;
     followbacks: number;
     unfollowed_after_mutual: number;
+    /** Users we actively unfollowed for never interacting with the owner. */
+    unfollowed_no_interaction: number;
     deleted: number;
     ml_positive: number;
   };
   today_follows: number;
+  /** Active unfollows today (unfollow worker, "no interaction" cases). */
+  today_unfollows: number;
+  /** Combined follows + unfollows today (shared daily budget). */
+  today_actions: number;
   daily_limit: number;
   owner: string | null;
   followers_count: number | null;
@@ -152,11 +146,19 @@ export interface LanguageOption {
 export interface Config {
   my_username: string;
   daily_follow_limit: number;
-  follow_delay: number;
+  /** Days a non-responding follow is kept before the unfollow worker. */
+  unfollow_after_days: number;
+  /** Random pause between two follow actions (seconds, range). */
+  follow_interval_min_seconds: number;
+  follow_interval_max_seconds: number;
   score_threshold: number;
   current_score_version: number;
   ml_enabled: boolean;
   ml_train_interval_hours: number;
+  /** Master switch for the ML follow gate (FollowWorker consults predictions). */
+  ml_follow_gate_enabled: boolean;
+  /** FollowWorker only follows candidates whose ML confidence >= this value. */
+  ml_follow_threshold: number;
   repo_freshness_days: number;
   owner_sync_days: number;
   score_freshness_days: number;
@@ -164,8 +166,29 @@ export interface Config {
   prioritize_small: boolean;
 }
 
-export interface JobsResponse {
-  items: Job[];
+/** Lifecycle of one background worker (worker_status table). */
+export type WorkerState = "running" | "paused" | "stopped" | "unknown";
+
+export interface WorkerStatus {
+  key: string;
+  label: string;
+  description: string;
+  /** Management-tab toggle — false = worker paused, true = active. */
+  enabled: boolean;
+  state: WorkerState;
+  running: boolean;
+  started_at: string | null;
+  stopped_at: string | null;
+  /** When the worker last completed a unit of work. */
+  last_action_at: string | null;
+  last_error_at: string | null;
+  last_error: string | null;
+  /** Liveness tick; a stale heartbeat means the bot process is down. */
+  heartbeat_at: string | null;
+}
+
+export interface WorkersResponse {
+  items: WorkerStatus[];
 }
 
 export interface Settings {
@@ -272,7 +295,9 @@ export interface DiscoveryState {
   rate_limit_per_hour: number;
   pass_max_users: number;
   last_run: DiscoveryRun | null;
-  /** Requests of the last pass as a % of the hourly budget. */
+  /** Sustained request rate of the last pass (requests/hour). */
+  requests_per_hour: number | null;
+  /** The last pass's request rate as a % of the hourly budget. */
   budget_percent: number;
   history: DiscoveryRun[];
 }

@@ -22,15 +22,26 @@ One-shot run (manual trigger)::
 """
 
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 
 from core.config import SNAPSHOT_HOUR, SNAPSHOT_ON_START
 from core.github_client import GitHubAuthError, GitHubNetworkError, GitHubRateLimitError
 from core.logger import get_logger
 from core.tz import get_timezone
+from workers.runtime import (
+    is_enabled,
+    mark_action,
+    mark_error,
+    mark_started,
+    mark_stopped,
+    sleep_interruptible,
+    wait_until_enabled,
+)
 
 log = get_logger(__name__)
+
+# Key of this worker in the worker_status table (dashboard toggle/status).
+WORKER_KEY = "snapshot"
 
 # Fields from the GitHub profile that change over time — captured in
 # extra_json so future analytics don't need to re-fetch the API.
@@ -77,21 +88,29 @@ class SnapshotWorker(threading.Thread):
             "Snapshot worker started (hour=%02d:00, on_start=%s)",
             self._hour, self._on_start,
         )
+        mark_started(db, WORKER_KEY)
 
-        # Initial snapshot so today has a data point even when the bot
-        # starts outside the midnight window.
-        if self._on_start:
-            self._snapshot_cycle(db, github)
+        try:
+            # Initial snapshot so today has a data point even when the bot
+            # starts outside the midnight window.
+            if self._on_start and is_enabled(db, WORKER_KEY):
+                self._run_cycle(db, github)
 
-        while not self._shutdown.is_set():
-            if not self._sleep_until_next_run(db):
-                break
-            if self._shutdown.is_set():
-                break
-            self._snapshot_cycle(db, github)
-
-        db.conn.close()
-        log.info("Snapshot worker stopped.")
+            while not self._shutdown.is_set():
+                if not is_enabled(db, WORKER_KEY):
+                    log.info("Snapshot worker paused — waiting for enable")
+                    if not wait_until_enabled(db, WORKER_KEY, self._shutdown):
+                        break
+                    continue
+                if not self._sleep_until_next_run(db):
+                    break
+                if self._shutdown.is_set():
+                    break
+                self._run_cycle(db, github)
+        finally:
+            mark_stopped(db, WORKER_KEY)
+            db.conn.close()
+            log.info("Snapshot worker stopped.")
 
     # ------------------------------------------------------------------
     # Scheduling
@@ -121,10 +140,9 @@ class SnapshotWorker(threading.Thread):
             next_local.strftime("%Y-%m-%d %H:%M"), tz, int(seconds),
         )
 
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline and not self._shutdown.is_set():
-            time.sleep(1)
-        return not self._shutdown.is_set()
+        return sleep_interruptible(
+            self._shutdown, seconds, db=db, key=WORKER_KEY,
+        )
 
     # ------------------------------------------------------------------
     # Snapshot logic (generic — reusable for any user)
@@ -141,6 +159,20 @@ class SnapshotWorker(threading.Thread):
         """
         owner = db.get_owner()
         return [owner] if owner else []
+
+    def _run_cycle(self, db, github):
+        """Run one snapshot cycle, recording errors in the worker status.
+
+        Keeps the same try/except → mark_error contract as the other
+        workers, so an unexpected failure never silently kills the daemon
+        thread (per-user errors are already handled inside ``_snapshot_cycle``).
+        """
+        try:
+            self._snapshot_cycle(db, github)
+            mark_action(db, WORKER_KEY)
+        except Exception as exc:
+            mark_error(db, WORKER_KEY, f"{type(exc).__name__}: {exc}")
+            log.exception("Snapshot worker error")
 
     def _snapshot_cycle(self, db, github):
         """Record snapshots for every target for today."""

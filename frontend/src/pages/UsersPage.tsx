@@ -32,6 +32,10 @@ const STATUS_FILTERS = [
   { value: "FOLLOWED", label: "Followed" },
   { value: "FOLLOWBACK", label: "Followback" },
   { value: "UNFOLLOWED_AFTER_MUTUAL_FOLLOW", label: "Unfollowed" },
+  {
+    value: "UNFOLLOWED_NO_INTERACTION",
+    label: "Unfollowed (no interaction)",
+  },
   { value: "DELETED", label: "Deleted" },
 ];
 

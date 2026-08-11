@@ -403,26 +403,70 @@ class GithubClient:
 
         ``GET /users/{username}/following/{my_username}``
         returns 204 (yes) or 404 (no).
+
+        Unlike the old implementation, 401 / 403 / 429 raise
+        ``GitHubAuthError`` / ``GitHubRateLimitError`` instead of being
+        silently read as "no" — a rate-limited or failed check must never
+        be mistaken for "they don't follow us" (which would trigger an
+        unfollow/mark-unfollowed on a possibly-mutual user).  5xx is
+        treated as a transient network error for the same reason.
         """
+        url = f"/users/{username}/following/{my_username}"
         try:
             r = requests.get(
-                f"{API}/users/{username}/following/{my_username}",
+                f"{API}{url}",
                 headers=HEADERS,
                 timeout=_REQUEST_TIMEOUT,
             )
-            record_api_request(
-                f"/users/{username}/following/{my_username}", r.status_code
-            )
-            return r.status_code == 204
         except requests.exceptions.RequestException as e:
             log.warning(
                 "Network error checking if %s follows %s: %s",
                 username, my_username, e,
             )
+            raise GitHubNetworkError(url, original_exception=e) from e
+
+        record_api_request(url, r.status_code)
+
+        if r.status_code == 204:
+            return True
+        if r.status_code == 404:
+            return False
+        if r.status_code == 401:
+            log.error(
+                "GitHub 401 (auth failure) for %s — token invalid/expired, aborting.",
+                url,
+            )
+            raise GitHubAuthError(401, url, r)
+        if r.status_code in (403, 429):
+            raise GitHubRateLimitError(
+                r.status_code, url, r,
+                retry_after=_parse_int(r.headers.get("Retry-After")),
+                reset_at=_parse_int(r.headers.get("X-RateLimit-Reset")),
+                remaining=_parse_int(r.headers.get("X-RateLimit-Remaining")),
+            )
+        if r.status_code >= 500:
+            log.warning(
+                "GitHub HTTP %s for %s — treating as network error",
+                r.status_code, url,
+            )
             raise GitHubNetworkError(
-                f"/users/{username}/following/{my_username}",
-                original_exception=e,
-            ) from e
+                url, original_exception=ValueError(f"HTTP {r.status_code}")
+            )
+        log.warning("Unexpected HTTP %s for %s — assuming no", r.status_code, url)
+        return False
+
+    def unfollow(self, username):
+        """Unfollow *username*.
+
+        Returns True when we no longer follow them — 204 (unfollowed) or
+        404 (we weren't following them anyway).  Rate limits / auth
+        failures raise like the rest of the client (the caller backs off
+        / aborts).
+        """
+        url = f"/user/following/{username}"
+        result = self.request("DELETE", url)
+        # 204 → request() returns True; 404 → returns None (already gone).
+        return result is True or result is None
 
     # --------------------------------------------------
     # Repositories & languages

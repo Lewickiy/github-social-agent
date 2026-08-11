@@ -1,11 +1,12 @@
 """GitHub Social Agent — CLI entry point.
 
 Usage (single working mode):
-    python main.py --silent            MAIN mode: collect + score + follow with
-                                       human-like delays.  Self-sustaining — waits
-                                       for the first followers / owner data, and
-                                       grows the follower graph via a calm
-                                       background worker (≤500 req/h).
+    python main.py --silent            MAIN mode: collect + score (follows handled
+                                       by a dedicated FollowWorker thread).
+                                       Self-sustaining — waits for the first
+                                       followers / owner data, and grows the
+                                       follower graph via a calm background
+                                       worker (≤500 req/h).
     python main.py --migrate           Apply pending database migrations
     python main.py --migrate-status    Show migration status
     python main.py --top               Show top 50 unscored users
@@ -18,7 +19,6 @@ Force / backfill modes (usually not needed — --silent covers all of them):
     python main.py --collect-users     Phase 1: discover new users from follower graph
     python main.py --collect-users-rep Phase 2: fetch repos/languages for all users
     python main.py --score             Score / re-score users
-    python main.py --follow            Follow top-scored users (respects daily limit)
 """
 
 import os
@@ -26,19 +26,20 @@ import signal
 import sys
 import threading
 
-from core.config import DISCOVERY_WORKER_ENABLED, MY_USERNAME, SILENT_WORKERS
+from core.config import MY_USERNAME, SILENT_WORKERS
 from core.database import Database
 from core.github_client import GithubClient
 from core.logger import get_logger
 from services.collector import Collector
-from services.follow_engine import FollowEngine
 from services.scorer import Scorer
 from services.silent import SilentRunner
 from workers.company_worker import CompanyWorker
+from workers.follow_worker import FollowWorker
 from workers.followback_check_worker import FollowbackCheckWorker
 from workers.graph_discovery_worker import GraphDiscoveryWorker
 from workers.ml_trainer import MLTrainerWorker
 from workers.snapshot_worker import SnapshotWorker, take_snapshot_now
+from workers.unfollow_worker import UnfollowWorker
 
 log = get_logger(__name__)
 
@@ -204,16 +205,36 @@ def main():
         collector.scan_owner_followers()        # followers — always (FOLLOWBACK detection)
 
     # ── Start background workers for long-running modes ──
-    long_running = {"--silent", "--collect", "--collect-users", "--collect-users-rep", "--score", "--follow"}
+    long_running = {"--silent", "--collect", "--collect-users", "--collect-users-rep", "--score"}
     company_worker = None
     followback_worker = None
+    follow_worker = None
+    unfollow_worker = None
     ml_worker = None
     snapshot_worker = None
     if long_running & set(sys.argv):
+        # All background workers start unconditionally — whether each one
+        # actually does work is controlled at runtime by the Management-tab
+        # toggle (worker_status.enabled, all active by default; see
+        # migration 027 + 028 and workers/runtime.py).  A paused worker
+        # simply waits, so it can be resumed from the UI without a restart.
         company_worker = CompanyWorker(_shutdown)
         company_worker.start()
         followback_worker = FollowbackCheckWorker(_shutdown)
         followback_worker.start()
+        # The ONLY follow executor in the system — silent and the other
+        # workers never subscribe; this thread drains the follow queue at
+        # its own human-like pace, independent of the analysis pipeline.
+        # NOTE: assumes a single bot process — a dashboard-launched
+        # `silent` job alongside the docker bot would start a second
+        # FollowWorker (the daily budget is shared via the actions table).
+        follow_worker = FollowWorker(_shutdown)
+        follow_worker.start()
+        # The counterpart cleanup thread: unfollows long-stale follows
+        # that never followed back nor interacted with the owner.  Shares
+        # the same daily budget as FollowWorker (50 actions combined).
+        unfollow_worker = UnfollowWorker(_shutdown)
+        unfollow_worker.start()
         ml_worker = MLTrainerWorker(_shutdown)
         ml_worker.start()
         snapshot_worker = SnapshotWorker(_shutdown)
@@ -222,9 +243,12 @@ def main():
     # ── Graph growth for the main working mode ──
     # A separate calm, rate-limited background worker walks the follower
     # graph (≤ DISCOVERY_RATE_LIMIT_PER_HOUR requests/hour) and adds new
-    # users to the queue — silent itself only collects + scores + follows.
+    # users to the queue — silent itself only collects + scores (follows
+    # are handled by the FollowWorker thread above).
     discovery_worker = None
-    if "--silent" in sys.argv and DISCOVERY_WORKER_ENABLED:
+    if "--silent" in sys.argv:
+        # Started for the main working mode; paused/resumed via the
+        # Management-tab toggle (worker_status.enabled, default active).
         discovery_worker = GraphDiscoveryWorker(_shutdown)
         discovery_worker.start()
 
@@ -247,9 +271,6 @@ def main():
 
         elif "--score" in sys.argv:
             Scorer(db, github).run()
-
-        elif "--follow" in sys.argv:
-            FollowEngine(db, github).run()
 
         elif "--top" in sys.argv:
             for user, score in db.top_users(50):
@@ -284,11 +305,12 @@ def main():
             print(
                 """\
 Usage (single working mode):
-    python main.py --silent            MAIN mode: collect + score + follow with
-                                       human-like delays.  Self-sustaining — waits
-                                       for the first followers / owner data, and
-                                       grows the follower graph via a calm
-                                       background worker (≤500 req/h).
+    python main.py --silent            MAIN mode: collect + score (follows handled
+                                       by a dedicated FollowWorker thread).
+                                       Self-sustaining — waits for the first
+                                       followers / owner data, and grows the
+                                       follower graph via a calm background
+                                       worker (≤500 req/h).
     python main.py --migrate           Apply pending database migrations
     python main.py --migrate-status    Show migration status
     python main.py --top               Show top 50 unscored users
@@ -300,8 +322,7 @@ Force / backfill modes (usually not needed — --silent covers all of them):
     python main.py --collect           Discover users & fetch repos (both phases)
     python main.py --collect-users     Phase 1: discover new users from follower graph
     python main.py --collect-users-rep Phase 2: fetch repos/languages for all users
-    python main.py --score             Score / re-score users
-    python main.py --follow            Follow top-scored users (respects daily limit)\
+    python main.py --score             Score / re-score users\
 """
             )
     except Exception as exc:

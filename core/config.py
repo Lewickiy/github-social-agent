@@ -73,9 +73,19 @@ HEADERS = _LazyHeaders()
 # BOT SETTINGS
 # =====================================================
 
+# The daily social-action budget — a COMBINED cap shared by follows and
+# unfollows: FollowWorker + UnfollowWorker together may perform at most
+# 50 actions per local day (e.g. 40 follows + 10 unfollows).  Both workers
+# count against this single pool (see Database.today_social_actions).
 DAILY_FOLLOW_LIMIT = 50
 
-FOLLOW_DELAY = 60
+# Random pause between two follow actions (seconds).  The FollowWorker is
+# the only follower in the system: it spaces subscriptions 20–30 minutes
+# apart, so the daily budget (≈50 follows, one every ~25 min) is spread
+# across the whole day instead of being spent in a burst.  The
+# UnfollowWorker uses the same random 20–30 min pacing.
+FOLLOW_INTERVAL_MIN_SECONDS = 20 * 60
+FOLLOW_INTERVAL_MAX_SECONDS = 30 * 60
 
 DATABASE = os.getenv("DATABASE", "data/github_social.db")
 
@@ -96,7 +106,8 @@ SILENT_DELAY_BETWEEN_USERS = 1  # pause between users
 SILENT_DELAY_BETWEEN_REPOS = 1      # was 2 (throttled to avoid /languages abuse)
 SILENT_DELAY_BETWEEN_REQUESTS = 1   # was 3 (throttled to avoid rate-limit)
 SILENT_DELAY_BETWEEN_SCORES = 1  # pause between scoring users
-SILENT_DELAY_BETWEEN_FOLLOWS = 2  # pause between follow actions in silent mode
+# (Follow pacing is handled by the dedicated FollowWorker — a random
+# 20–30 min interval, see FOLLOW_INTERVAL_MIN/MAX_SECONDS below.)
 
 # Number of parallel workers that process the silent-mode queue.
 # 1 = original single-threaded behaviour; 2 roughly doubles the request
@@ -108,7 +119,52 @@ SILENT_WORKERS = 2
 # FOLLOW SCORING
 # =====================================================
 
-SILENT_FOLLOW_SCORE_THRESHOLD = 35  # minimum score to auto-follow in silent mode
+SILENT_FOLLOW_SCORE_THRESHOLD = 35  # minimum score to auto-follow (silent & FollowWorker)
+
+# =====================================================
+# FOLLOW WORKER — dedicated follow executor thread
+# =====================================================
+
+# Follows the queued candidates (NEW users with score >= threshold, best
+# score first) in a separate daemon thread (workers/follow_worker.py),
+# independently of the analysis pipeline: silent mode only collects +
+# scores, while the worker drains the follow queue at a random 20–30 min
+# interval between subscriptions and within DAILY_FOLLOW_LIMIT.  When no
+# qualifying users exist it simply waits — polling every
+# FOLLOW_WORKER_POLL_INTERVAL_SECONDS.
+#
+# This flag only seeds the *fresh-install* default of the Management-tab
+# toggle (migration 027); at runtime the worker's enabled/disabled state
+# lives in the worker_status table and is controlled from the dashboard.
+FOLLOW_WORKER_ENABLED = True
+FOLLOW_WORKER_POLL_INTERVAL_SECONDS = 60
+
+# =====================================================
+# UNFOLLOW WORKER — inactive-follow cleanup thread
+# =====================================================
+
+# A dedicated daemon thread (workers/unfollow_worker.py) unfollows users
+# who were followed UNFOLLOW_AFTER_DAYS or more ago, never followed us
+# back, and never interacted with the owner's profile or repositories
+# (star / fork / issue / PR / comment / review / push / … — checked live
+# via the public events timeline, NOT persisted).  It paces unfollows at
+# the same random 20–30 min interval as the FollowWorker and draws from
+# the SAME daily budget (DAILY_FOLLOW_LIMIT, follows + unfollows combined).
+#
+# UNFOLLOW_WORKER_ENABLED only seeds the *fresh-install* default of the
+# Management-tab toggle (migration 028); at runtime the worker's
+# enabled/disabled state lives in the worker_status table and is
+# controlled from the dashboard like every other worker.
+UNFOLLOW_WORKER_ENABLED = True
+
+# How long (days) we keep a non-responding follow before it becomes
+# eligible for the unfollow worker.  Matches the ML negative-class
+# observation window (ML_MIN_* / get_training_users 7-day rule).
+UNFOLLOW_AFTER_DAYS = 7
+
+# Poll interval when no eligible users exist (the worker waits and
+# re-scans instead of burning API requests).
+UNFOLLOW_WORKER_POLL_INTERVAL_SECONDS = 60
 
 # =====================================================
 # OWNER FOLLOWER SCAN — cyclic check in silent mode
@@ -189,8 +245,8 @@ SILENT_MIN_OWNER_REPOS = 1
 # owner-follower scans run inside silent, while follower-graph growth is
 # handled by a separate calm background worker (see the DISCOVERY_* block
 # below).  When False, silent mode processes one batch and exits (legacy
-# one-shot behaviour).  Either way, --collect* / --score / --follow are
-# only needed as one-off force/backfill modes.
+# one-shot behaviour).  Either way, --collect* / --score are only needed
+# as one-off force/backfill modes.
 SILENT_CONTINUOUS = True
 
 # =====================================================
@@ -199,7 +255,9 @@ SILENT_CONTINUOUS = True
 
 # Grows the network by walking the follower graph at a conservative,
 # constant rate instead of in bursts.  Started automatically by --silent
-# (the only mode that needs growth); disable with DISCOVERY_WORKER_ENABLED.
+# (the only mode that needs growth).  DISCOVERY_WORKER_ENABLED only seeds
+# the fresh-install default of the Management-tab toggle (migration 027);
+# at runtime the worker's state lives in the worker_status table.
 #
 # Hard request cap: each pass walks at most DISCOVERY_PASS_MAX_USERS users
 # (~1 profile request each, plus a followers request when their count
@@ -218,6 +276,34 @@ ML_ENABLED = True                  # enable ML inference
 ML_TRAIN_AFTER_START = True        # train immediately after worker starts
 ML_TRAIN_INTERVAL_HOURS = 24       # re-train every N hours
 ML_MODEL_DIR = "models"            # directory for saved model files
+
+# ── ML follow gate (the "strictness" dial) ──────────────────────────────
+# The FollowWorker normally follows every NEW candidate whose heuristic
+# score passes SILENT_FOLLOW_SCORE_THRESHOLD.  The ML follow gate makes
+# the model a second opinion: when enabled, a candidate whose stored
+# followback prediction is 0 (model confidence < threshold) is skipped,
+# so the daily budget goes to users the model believes will reciprocate.
+#
+#   * ``ML_FOLLOW_GATE_ENABLED`` — master switch for the gate.  These
+#     constants only seed the *fresh-install* defaults; at runtime both
+#     values live in the settings table (keys ``ml_follow_gate_enabled`` /
+#     ``ml_follow_threshold``) and are editable from the Management tab
+#     without a restart.
+#   * ``ML_FOLLOW_THRESHOLD`` — the model's followback probability a
+#     candidate must reach to be followed (0.5 = current decision rule;
+#     higher = fewer, more selective follows).  Predictions are stored
+#     with the threshold applied (ml_follow_prediction = 0/1), and a
+#     background recompute refreshes them whenever the threshold changes.
+#   * Candidates with no prediction yet (NULL — scored before ML existed
+#     or inference failed) are NOT vetoed: the gate only blocks a
+#     definitive 0, so the queue keeps flowing.
+#
+# The gate is OFF by default: the bot follows by heuristic score exactly
+# as before, while the model still trains and refreshes predictions in
+# the background (shadow mode) — flip the Management-tab toggle to make
+# the gate a hard second opinion again.
+ML_FOLLOW_GATE_ENABLED = False
+ML_FOLLOW_THRESHOLD = 0.5
 
 # Feature dimensionality.  Kept deliberately small: with a tiny training
 # set (a few hundred labeled users) every extra multi-hot dimension is

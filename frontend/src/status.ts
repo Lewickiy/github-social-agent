@@ -1,5 +1,3 @@
-import type { Job } from "./types";
-
 export const STATUS_META: Record<
   string,
   { label: string; cls: string; dot: string }
@@ -23,6 +21,11 @@ export const STATUS_META: Record<
     label: "Unfollowed",
     cls: "bg-danger-subtle text-danger-fg border border-danger/30",
     dot: "bg-danger",
+  },
+  UNFOLLOWED_NO_INTERACTION: {
+    label: "Unfollowed (no interaction)",
+    cls: "bg-attention-subtle text-attention border border-attention/30",
+    dot: "bg-attention",
   },
   DELETED: {
     label: "Deleted",
@@ -57,6 +60,10 @@ export const ACTION_META: Record<string, ActionMeta> = {
     label: "Unfollowed",
     cls: "bg-danger-subtle text-danger-fg border border-danger/30",
   },
+  UNFOLLOW: {
+    label: "Unfollowed (no interaction)",
+    cls: "bg-attention-subtle text-attention border border-attention/30",
+  },
   DELETED: {
     label: "Deleted",
     cls: "bg-canvas-subtle text-fg-muted border border-border",
@@ -73,36 +80,11 @@ export function actionMeta(action: string): ActionMeta {
   return meta ? meta : { ...FALLBACK_ACTION, label: action };
 }
 
-export const JOB_STATUS_META: Record<
-  string,
-  { label: string; cls: string; dot: string }
-> = {
-  PENDING: {
-    label: "Pending",
-    cls: "bg-canvas-subtle text-fg-muted border border-border",
-    dot: "bg-fg-subtle",
-  },
-  RUNNING: {
-    label: "Running",
-    cls: "bg-accent/10 text-accent border border-accent/30",
-    dot: "bg-accent animate-pulse",
-  },
-  SUCCESS: {
-    label: "Success",
-    cls: "bg-success-subtle text-success-fg border border-success/30",
-    dot: "bg-success",
-  },
-  FAILED: {
-    label: "Failed",
-    cls: "bg-danger-subtle text-danger-fg border border-danger/30",
-    dot: "bg-danger",
-  },
-};
-
 export const STATUS_ORDER = [
   "FOLLOWED",
   "FOLLOWBACK",
   "UNFOLLOWED_AFTER_MUTUAL_FOLLOW",
+  "UNFOLLOWED_NO_INTERACTION",
   "DELETED",
 ];
 
@@ -156,39 +138,3 @@ export function scoreColor(score: number | null | undefined): string {
   return "#57606a";
 }
 
-// Bot job modes shown in the dashboard launcher.  ``group`` splits them
-// into the single working mode ("main" — silent, which is self-sustaining:
-// it waits for first followers/owner data and grows the follower graph on
-// its own) and the one-off force/backfill modes ("force"), which are only
-// needed for manual interventions.
-export interface ModeMeta {
-  label: string;
-  desc: string;
-  group: "main" | "force";
-}
-
-export const MODE_LABELS: Record<string, ModeMeta> = {
-  silent: {
-    label: "Silent run",
-    desc: "All-in-one: collect + score + follow, runs continuously",
-    group: "main",
-  },
-  collect: { label: "Full collect", desc: "Discover users + fetch repos", group: "force" },
-  "collect-users": { label: "Discover users", desc: "Traverse the follower graph", group: "force" },
-  "collect-users-rep": { label: "Collect repos", desc: "Fetch repos & languages", group: "force" },
-  "collect-self": { label: "Sync owner", desc: "Refresh your own profile data", group: "force" },
-  score: { label: "Score", desc: "Score / re-score all users", group: "force" },
-  follow: { label: "Follow", desc: "Follow top-scored users", group: "force" },
-  snapshot: { label: "Snapshot", desc: "Record today's profile snapshot", group: "force" },
-};
-
-export function jobDuration(job: Job): string {
-  if (!job.started_at) return "—";
-  const end = job.finished_at ? new Date(job.finished_at) : new Date();
-  const start = new Date(job.started_at);
-  const s = Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}

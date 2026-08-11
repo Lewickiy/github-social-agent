@@ -12,7 +12,6 @@ from core.config import (
     CURRENT_SCORE_VERSION,
     DISCOVERY_PASS_MAX_USERS,
     DISCOVERY_RATE_LIMIT_PER_HOUR,
-    DISCOVERY_WORKER_ENABLED,
     GITHUB_API_RATE_LIMIT,
     ML_MODEL_DIR,
 )
@@ -171,6 +170,9 @@ def overview_stats(db, daily_limit, days=None):
         followed = entered_in_window("FOLLOWED")
         followbacks = entered_in_window("FOLLOWBACK")
         unfollowed = entered_in_window("UNFOLLOWED_AFTER_MUTUAL_FOLLOW")
+        no_interaction_unfollowed = entered_in_window(
+            "UNFOLLOWED_NO_INTERACTION"
+        )
         deleted = entered_in_window("DELETED")
     else:
         # All-time counts come straight from the narrow materialised
@@ -186,6 +188,7 @@ def overview_stats(db, daily_limit, days=None):
         followed = current_count("FOLLOWED")
         followbacks = current_count("FOLLOWBACK")
         unfollowed = current_count("UNFOLLOWED_AFTER_MUTUAL_FOLLOW")
+        no_interaction_unfollowed = current_count("UNFOLLOWED_NO_INTERACTION")
         deleted = current_count("DELETED")
     # Real processing queue: users still awaiting repo collection / fresh
     # scoring (same eligibility the silent runner uses).  `status = 'NEW'`
@@ -199,12 +202,20 @@ def overview_stats(db, daily_limit, days=None):
         scored_p,
     )
     # "Today" follows the user's local calendar day (core.tz), so the
-    # daily budget meter resets at local midnight.
+    # daily budget meter resets at local midnight.  Follows and unfollows
+    # share one combined budget (DAILY_FOLLOW_LIMIT), so both are counted
+    # and summed for the meter.
     today_follows = count(
         "SELECT COUNT(*) FROM actions "
         "WHERE action = 'FOLLOW' AND created_at >= ?",
         (local_midnight_utc(db).isoformat(),),
     )
+    today_unfollows = count(
+        "SELECT COUNT(*) FROM actions "
+        "WHERE action = 'UNFOLLOW' AND created_at >= ?",
+        (local_midnight_utc(db).isoformat(),),
+    )
+    today_actions = today_follows + today_unfollows
     owner = db.get_owner()
 
     return {
@@ -216,10 +227,13 @@ def overview_stats(db, daily_limit, days=None):
             "followed": followed,
             "followbacks": followbacks,
             "unfollowed_after_mutual": unfollowed,
+            "unfollowed_no_interaction": no_interaction_unfollowed,
             "deleted": deleted,
             "ml_positive": ml_positive,
         },
         "today_follows": today_follows,
+        "today_unfollows": today_unfollows,
+        "today_actions": today_actions,
         "daily_limit": daily_limit,
         "owner": owner,
         "followers_count": (
@@ -316,7 +330,8 @@ def status_distribution(db, days=None):
             JOIN users u ON u.username = h.username
             WHERE u.owner = 0
               AND h.status IN ('FOLLOWED', 'FOLLOWBACK',
-                               'UNFOLLOWED_AFTER_MUTUAL_FOLLOW', 'DELETED')
+                               'UNFOLLOWED_AFTER_MUTUAL_FOLLOW',
+                               'UNFOLLOWED_NO_INTERACTION', 'DELETED')
               AND h.changed_at >= ?
             GROUP BY h.status
             """,
@@ -329,6 +344,10 @@ def status_distribution(db, days=None):
             {
                 "status": "UNFOLLOWED_AFTER_MUTUAL_FOLLOW",
                 "count": d.get("UNFOLLOWED_AFTER_MUTUAL_FOLLOW", 0),
+            },
+            {
+                "status": "UNFOLLOWED_NO_INTERACTION",
+                "count": d.get("UNFOLLOWED_NO_INTERACTION", 0),
             },
             {"status": "DELETED", "count": d.get("DELETED", 0)},
         ]
@@ -415,18 +434,19 @@ def list_users(db, q=None, status=None, language=None, ml=None,
     ``ml`` may be ``None`` (no filter), 0, 1, or "none" (users with a
     NULL prediction).  Returns ``(items, total)``.  Each item carries
     the user's top-3 languages for the language dots in the table.
+
+    Deleted users are included in the default (no status filter) view,
+    carrying a ``DELETED`` status badge — soft deletion keeps their rows
+    (status history / activity feed), so the full pipeline state stays
+    visible.  The explicit ``status='DELETED'`` filter still narrows to
+    them alone.
     """
     conn = db.conn
     # Current status comes from the materialised user_current_status table;
     # followed_at is its maintained FOLLOWED-transition time.  Filters are
-    # written against the narrow current_status table (NOT IN / IN subqueries)
-    # so the wide users rows are never scanned for the join.
-    where = [
-        "u.owner = 0",
-        "u.username NOT IN ("
-        "    SELECT username FROM user_current_status WHERE status = 'DELETED'"
-        ")",
-    ]
+    # written against the narrow current_status table (IN / NOT IN
+    # subqueries) so the wide users rows are never scanned for the join.
+    where = ["u.owner = 0"]
     params = []
 
     if q:
@@ -733,22 +753,33 @@ def discovery_stats(db):
     * ``last_run`` — the most recent pass (started/finished at, users
       walked, new users found, requests made, duration), or None when the
       worker has never run (or the migration is not applied).
-    * ``budget_percent`` — the last pass's request count as a share of
-      the hourly budget (the worker runs one pass per hour window).
+    * ``requests_per_hour`` — the last pass's sustained request rate
+      (total requests / pass duration).  A pass can span several hours,
+      so this — not the raw pass total — is the honest comparison
+      against the hourly budget.
+    * ``budget_percent`` — that rate as a share of
+      ``DISCOVERY_RATE_LIMIT_PER_HOUR`` (>100 means the pass ran over
+      budget).
     * ``history`` — the most recent passes, newest first.
     """
     runs = db.discovery_runs(limit=20)
     last = runs[0] if runs else None
-    budget_percent = (
-        round(last["requests"] / DISCOVERY_RATE_LIMIT_PER_HOUR * 100, 1)
-        if last and DISCOVERY_RATE_LIMIT_PER_HOUR
-        else 0.0
-    )
+    requests_per_hour = None
+    budget_percent = 0.0
+    if last and last["duration_seconds"] and DISCOVERY_RATE_LIMIT_PER_HOUR:
+        hours = last["duration_seconds"] / 3600
+        requests_per_hour = round(last["requests"] / hours, 1)
+        budget_percent = round(
+            requests_per_hour / DISCOVERY_RATE_LIMIT_PER_HOUR * 100, 1
+        )
     return {
-        "enabled": DISCOVERY_WORKER_ENABLED,
+        # The worker_status toggle (default active) is the source of truth
+        # — the Management tab pauses/resumes this worker at runtime.
+        "enabled": db.worker_enabled("graph_discovery"),
         "rate_limit_per_hour": DISCOVERY_RATE_LIMIT_PER_HOUR,
         "pass_max_users": DISCOVERY_PASS_MAX_USERS,
         "last_run": last,
+        "requests_per_hour": requests_per_hour,
         "budget_percent": budget_percent,
         "history": runs,
     }

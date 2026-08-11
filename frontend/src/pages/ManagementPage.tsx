@@ -1,47 +1,60 @@
-import {useCallback, useEffect, useState} from "react";
+import {useCallback, useEffect, useRef, useState} from "react";
 import {
+    Activity,
     Bot,
     ChevronDown,
-    ChevronUp,
-    ClipboardList,
     ExternalLink,
     Globe,
+    History,
     LocateFixed,
-    Play,
     RefreshCw,
     Settings2,
     Waypoints,
 } from "lucide-react";
 import {api, formatDate, timeAgo} from "../api";
-import type {Config, DiscoveryState, Job, Settings} from "../types";
-import {JobStatusBadge} from "../components/StatusBadge";
+import type {Config, DiscoveryState, Settings, WorkerState, WorkerStatus} from "../types";
 import {usePolling} from "../hooks/usePolling";
-import {jobDuration, MODE_LABELS, type ModeMeta} from "../status";
 import {REFRESH_OPTIONS, useRefresh} from "../refresh";
 import {detectSystemTimezone, formatOffset, TIMEZONE_OPTIONS,} from "../timezones";
 
 export default function ManagementPage() {
     const {intervalMs, intervalLabel, optionIndex, setIntervalMs} = useRefresh();
-    const [jobs, setJobs] = useState<Job[]>([]);
+    const [workers, setWorkers] = useState<WorkerStatus[]>([]);
     const [config, setConfig] = useState<Config | null>(null);
     const [discovery, setDiscovery] = useState<DiscoveryState | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [starting, setStarting] = useState<string | null>(null);
-    const [busy, setBusy] = useState(false);
-    const [logFor, setLogFor] = useState<number | null>(null);
-    const [logText, setLogText] = useState<string | null>(null);
+    const [toggling, setToggling] = useState<string | null>(null);
     const [settings, setSettings] = useState<Settings | null>(null);
     const [tzSaving, setTzSaving] = useState(false);
     const [tzNotice, setTzNotice] = useState<string | null>(null);
+    // ML follow gate — local drafts so the slider stays smooth while
+    // dragging (the server value only catches up after the PUT + poll).
+    const [mlGateOn, setMlGateOn] = useState(true);
+    const [mlThreshold, setMlThreshold] = useState(0.5);
+    const [mlSaving, setMlSaving] = useState(false);
+    const [mlNotice, setMlNotice] = useState<string | null>(null);
+    const mlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => {
+        if (!config) return;
+        setMlGateOn(config.ml_follow_gate_enabled);
+        setMlThreshold(config.ml_follow_threshold);
+    }, [config]);
+
+    useEffect(() => {
+        return () => {
+            if (mlSaveTimer.current) clearTimeout(mlSaveTimer.current);
+        };
+    }, []);
 
     const load = useCallback(async () => {
         try {
-            const [j, c, d] = await Promise.all([
-                api.jobs(),
+            const [w, c, d] = await Promise.all([
+                api.workers(),
                 api.config(),
                 api.discovery(),
             ]);
-            setJobs(j.items);
+            setWorkers(w.items);
             setConfig(c);
             setDiscovery(d);
             setError(null);
@@ -49,6 +62,42 @@ export default function ManagementPage() {
             setError((e as Error).message);
         }
     }, []);
+
+    const saveMLFollow = useCallback(
+        async (cfg: { enabled?: boolean; threshold?: number }) => {
+            setMlSaving(true);
+            setMlNotice(null);
+            try {
+                await api.saveMLFollowConfig(cfg);
+                await load();
+                if (cfg.threshold !== undefined) {
+                    setMlNotice(
+                        `Threshold ${cfg.threshold.toFixed(2)} saved — predictions are being recomputed in the background.`
+                    );
+                } else if (cfg.enabled !== undefined) {
+                    setMlNotice(
+                        `ML follow gate ${cfg.enabled ? "enabled" : "disabled"} — the FollowWorker picks it up on its next cycle.`
+                    );
+                }
+            } catch (e) {
+                setError((e as Error).message);
+            } finally {
+                setMlSaving(false);
+            }
+        },
+        [load]
+    );
+
+    const onMLThresholdChange = (value: number) => {
+        setMlThreshold(value);
+        // Debounce the PUT — dragging fires many onChange events, and the
+        // API only triggers the (seconds-long) prediction recompute when
+        // the stored value actually changes.
+        if (mlSaveTimer.current) clearTimeout(mlSaveTimer.current);
+        mlSaveTimer.current = setTimeout(() => {
+            saveMLFollow({threshold: value});
+        }, 400);
+    };
 
     useEffect(() => {
         load();
@@ -112,77 +161,23 @@ export default function ManagementPage() {
         }
     };
 
-    // Poll fast while a job is running so statuses update live; otherwise
-    // settle into the user-selected cadence (default 1 min, 3s–30m slider).
-    const running = jobs.filter((j) => j.status === "RUNNING");
+    // Poll fast while any worker is running so toggles/statuses update
+    // live; otherwise settle into the user-selected cadence.
+    const runningWorkers = workers.filter((w) => w.running);
     usePolling(load, () =>
-        running.length > 0 ? Math.min(8000, intervalMs) : intervalMs
+        runningWorkers.length > 0 ? Math.min(10000, intervalMs) : intervalMs
     );
 
-    const startJob = async (mode: string) => {
-        setStarting(mode);
-        setBusy(true);
+    const toggleWorker = async (w: WorkerStatus, enabled: boolean) => {
+        setToggling(w.key);
         setError(null);
         try {
-            await api.startJob(mode);
+            await api.setWorkerEnabled(w.key, enabled);
             await load();
         } catch (e) {
             setError((e as Error).message);
         } finally {
-            setStarting(null);
-            setBusy(false);
-        }
-    };
-
-    // Single working mode (silent) is the star of the launcher; the rest
-    // are one-off force/backfill modes kept under a collapsible section.
-    const mainModes = Object.entries(MODE_LABELS).filter(([, m]) => m.group === "main");
-    const forceModes = Object.entries(MODE_LABELS).filter(([, m]) => m.group === "force");
-
-    const modeButton = (mode: string, meta: ModeMeta) => {
-        const isRunning = running.some((j) => j.mode === mode);
-        return (
-            <button
-                key={mode}
-                disabled={busy}
-                onClick={() => startJob(mode)}
-                className="w-full flex items-center gap-3 p-2.5 rounded-md border border-border bg-canvas-subtle/50 hover:border-success/50 hover:bg-success-subtle/40 transition-colors group disabled:opacity-60 disabled:cursor-not-allowed text-left"
-            >
-                <span
-                    className={`w-2 h-2 rounded-full shrink-0 ${
-                        isRunning ? "bg-accent animate-pulse" : "bg-fg-subtle group-hover:bg-success"
-                    }`}
-                />
-                <span className="flex-1 min-w-0">
-                    <span className="block text-[13px] font-medium">
-                        {meta.label}
-                    </span>
-                    <span className="block text-[12px] text-fg-muted">
-                        {meta.desc}
-                    </span>
-                </span>
-                {starting === mode ? (
-                    <RefreshCw size={15} className="animate-spin text-fg-subtle"/>
-                ) : (
-                    <Play size={15} className="text-fg-subtle group-hover:text-success"/>
-                )}
-            </button>
-        );
-    };
-
-    const toggleLog = async (id: number) => {
-        if (logFor === id) {
-            setLogFor(null);
-            setLogText(null);
-            return;
-        }
-        setLogFor(id);
-        setLogText(null);
-        try {
-            const r = await api.jobLog(id);
-            setLogText(r.log);
-        } catch (e) {
-            setLogText(`(no log available: ${(e as Error).message})`);
+            setToggling(null);
         }
     };
 
@@ -191,7 +186,7 @@ export default function ManagementPage() {
             <div>
                 <h1 className="text-[20px] font-semibold tracking-tight">Management</h1>
                 <p className="text-[13px] text-fg-muted">
-                    Run bot modes, watch job history, and review configuration
+                    Pause/resume background workers and review configuration
                 </p>
             </div>
 
@@ -301,50 +296,49 @@ export default function ManagementPage() {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                {/* Job launcher */}
+                {/* Worker toggles */}
                 <div className="card p-4">
-                    <div className="flex items-center gap-2 mb-3">
-                        <Play size={15} className="text-success-fg"/>
-                        <h2 className="text-[14px] font-semibold">Run a job</h2>
+                    <div className="flex items-center gap-2 mb-1">
+                        <Activity size={15} className="text-success-fg"/>
+                        <h2 className="text-[14px] font-semibold">Workers</h2>
+                        <span className="ml-auto badge bg-success-subtle text-success-fg border border-success/30">
+                            {workers.filter((w) => w.enabled).length}/{workers.length} on
+                        </span>
                     </div>
-
-                    {running.length > 0 && (
-                        <div className="mb-3 p-2.5 rounded-md border border-accent/30 bg-accent/5">
-                            <div className="text-[12px] font-medium text-accent mb-1 flex items-center gap-1.5">
-                                <RefreshCw size={12} className="animate-spin"/>
-                                {running.length} running
-                            </div>
-                            {running.map((j) => (
-                                <div key={j.id} className="text-[12px] text-fg-muted">
-                                    #{j.id} {MODE_LABELS[j.mode]?.label ?? j.mode} · pid {j.pid} ·{" "}
-                                    {jobDuration(j)}
-                                </div>
-                            ))}
-                        </div>
-                    )}
+                    <p className="text-[12px] text-fg-muted mb-3">
+                        Background daemon threads. Toggle a worker off to pause it and on
+                        to resume — the change applies on the worker's next cycle, no
+                        restart needed. Toggle states are persisted in the database and
+                        survive container restarts.
+                    </p>
 
                     <div className="space-y-1.5">
-                        {mainModes.map(([mode, meta]) => modeButton(mode, meta))}
-
-                        <details className="group/force mt-2">
-                            <summary className="flex items-center justify-between text-[12px] text-fg-subtle hover:text-fg-muted cursor-pointer select-none py-1">
-                                <span>Force / backfill modes</span>
-                                <ChevronDown
-                                    size={14}
-                                    className="transition-transform group-open/force:rotate-180"
+                        {workers.map((w) => (
+                            <div
+                                key={w.key}
+                                className="flex items-center gap-3 p-2.5 rounded-md border border-border bg-canvas-subtle/50 transition-colors group"
+                            >
+                                <span
+                                    className={`w-2 h-2 rounded-full shrink-0 ${stateDot(w.state)}`}
+                                    title={w.state}
                                 />
-                            </summary>
-                            <div className="space-y-1.5 mt-1.5">
-                                {forceModes.map(([mode, meta]) => modeButton(mode, meta))}
+                                <span className="flex-1 min-w-0">
+                                    <span className="block text-[13px] font-medium">
+                                        {w.label}
+                                    </span>
+                                    <span className="block text-[12px] text-fg-muted leading-snug">
+                                        {w.description}
+                                    </span>
+                                </span>
+                                <Switch
+                                    checked={w.enabled}
+                                    disabled={toggling !== null}
+                                    label={`${w.enabled ? "Pause" : "Resume"} ${w.label} worker`}
+                                    onChange={(enabled) => toggleWorker(w, enabled)}
+                                />
                             </div>
-                        </details>
+                        ))}
                     </div>
-
-                    <p className="mt-3 text-[12px] text-fg-subtle">
-                        Jobs run <code className="font-mono">python main.py &lt;mode&gt;</code> in the
-                        background. Output is captured to{" "}
-                        <code className="font-mono">logs/jobs/</code>.
-                    </p>
                 </div>
 
                 {/* Config */}
@@ -362,12 +356,21 @@ export default function ManagementPage() {
                             <Row label="Account" value={`@${config.my_username}`} mono/>
                             <Row
                                 label="Daily follow limit"
-                                value={String(config.daily_follow_limit)}
+                                value={`${String(config.daily_follow_limit)} (follows + unfollows)`}
                                 mono
                             />
                             <Row
-                                label="Follow delay"
-                                value={`${config.follow_delay}s`}
+                                label="Unfollow after"
+                                value={`${config.unfollow_after_days}d no interaction`}
+                                mono
+                            />
+                            <Row
+                                label="Follow interval"
+                                value={`${Math.round(
+                                    config.follow_interval_min_seconds / 60
+                                )}–${Math.round(
+                                    config.follow_interval_max_seconds / 60
+                                )}m`}
                                 mono
                             />
                             <Row
@@ -416,82 +419,130 @@ export default function ManagementPage() {
                         </div>
                     )}
 
+                    {/* ML follow gate — the "strictness" dial */}
+                    {config && (
+                        <div className="mt-3 pt-3 border-t border-border-muted/60">
+                            <div className="flex items-center gap-2">
+                                <span className="text-[13px] font-medium">
+                                    ML follow gate
+                                </span>
+                                <Switch
+                                    checked={mlGateOn}
+                                    disabled={mlSaving}
+                                    label="Toggle ML follow gate"
+                                    onChange={(v) => {
+                                        setMlGateOn(v);
+                                        saveMLFollow({enabled: v});
+                                    }}
+                                />
+                                <span
+                                    className={`ml-auto badge border ${
+                                        mlGateOn
+                                            ? "bg-success-subtle text-success-fg border-success/30"
+                                            : "bg-canvas-subtle text-fg-muted border-border"
+                                    }`}
+                                >
+                                    {mlGateOn ? "On" : "Off"}
+                                </span>
+                            </div>
+                            <p className="text-[12px] text-fg-muted mt-1.5 leading-snug">
+                                When on, the FollowWorker subscribes only to candidates
+                                whose ML followback confidence is at or above the
+                                threshold — a second opinion on top of the score.
+                                Higher = fewer, more selective follows (and a better
+                                follow-back rate).
+                            </p>
+                            <div className="flex items-center gap-3 mt-2.5">
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={0.9}
+                                    step={0.05}
+                                    value={mlThreshold}
+                                    disabled={!mlGateOn || mlSaving}
+                                    onChange={(e) =>
+                                        onMLThresholdChange(Number(e.target.value))
+                                    }
+                                    className="flex-1 h-2 rounded-full bg-border-muted accent-accent cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                    aria-label="ML follow threshold"
+                                />
+                                <span className="font-mono text-[13px] w-12 text-right">
+                                    {mlThreshold.toFixed(2)}
+                                </span>
+                            </div>
+                            <div className="flex justify-between text-[10px] text-fg-subtle mt-0.5">
+                                <span>0.10 permissive</span>
+                                <span>0.50 current rule</span>
+                                <span>0.90 strict</span>
+                            </div>
+                            {mlNotice && (
+                                <p className="mt-1.5 text-[11px] text-success-fg">
+                                    {mlNotice}
+                                </p>
+                            )}
+                        </div>
+                    )}
+
                     <p className="mt-3 text-[12px] text-fg-subtle">
-                        Values come from <code className="font-mono">config.py</code> /
-                        <code className="font-mono">.env</code>.
+                        Static values come from <code className="font-mono">config.py</code> /
+                        <code className="font-mono">.env</code>; the ML gate is stored in the
+                        database and applies without a restart.
                     </p>
                 </div>
 
-                {/* Job history */}
+                {/* Worker activity — lifecycle from worker_status */}
                 <div className="card p-4">
-                    <div className="flex items-center gap-2 mb-3">
-                        <ClipboardList size={15} className="text-fg-muted"/>
-                        <h2 className="text-[14px] font-semibold">Job history</h2>
+                    <div className="flex items-center gap-2 mb-1">
+                        <History size={15} className="text-fg-muted"/>
+                        <h2 className="text-[14px] font-semibold">Worker activity</h2>
                     </div>
+                    <p className="text-[12px] text-fg-muted mb-3">
+                        Per-worker lifecycle: when each worker started, stopped, last did
+                        something, and last hit an error.
+                    </p>
 
-                    {jobs.length === 0 && (
+                    {workers.length === 0 && (
                         <div className="text-[13px] text-fg-subtle">
-                            No jobs yet — start one from the left panel.
+                            No worker data yet — status appears as soon as the bot
+                            starts its threads.
                         </div>
                     )}
 
                     <div className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1">
-                        {jobs.map((j) => {
-                            const open = logFor === j.id;
-                            return (
-                                <div
-                                    key={j.id}
-                                    className="rounded-md border border-border bg-canvas-subtle/40 overflow-hidden"
-                                >
-                                    <div className="flex items-center gap-2 p-2">
-                    <span className="text-[12px] text-fg-subtle font-mono">
-                      #{j.id}
-                    </span>
-                                        <span className="text-[13px] font-medium flex-1 truncate">
-                      {MODE_LABELS[j.mode]?.label ?? j.mode}
-                    </span>
-                                        <span className="text-[12px] text-fg-subtle">
-                      {jobDuration(j)}
-                    </span>
-                                        <JobStatusBadge status={j.status}/>
-                                        <button
-                                            className="btn !p-1"
-                                            title="View log"
-                                            onClick={() => toggleLog(j.id)}
-                                        >
-                                            {open ? (
-                                                <ChevronUp size={14}/>
-                                            ) : (
-                                                <ChevronDown size={14}/>
-                                            )}
-                                        </button>
-                                    </div>
-                                    <div className="px-2 pb-1.5 text-[11px] text-fg-subtle flex justify-between">
-                    <span>
-                      started {timeAgo(j.started_at)} ·{" "}
-                        {j.finished_at
-                            ? `finished ${formatDate(j.finished_at)}`
-                            : "not finished"}
-                    </span>
-                                        {j.exit_code != null && (
-                                            <span className="font-mono">exit {j.exit_code}</span>
-                                        )}
-                                    </div>
-                                    {j.error && (
-                                        <div
-                                            className="mx-2 mb-2 p-2 rounded bg-danger-subtle text-danger-fg text-[11px] font-mono max-h-[120px] overflow-auto whitespace-pre-wrap">
-                                            {j.error}
-                                        </div>
-                                    )}
-                                    {open && (
-                                        <div
-                                            className="mx-2 mb-2 p-2 rounded bg-canvas text-fg-muted text-[11px] font-mono max-h-[180px] overflow-auto whitespace-pre-wrap border border-border">
-                                            {logText ?? "Loading log…"}
-                                        </div>
-                                    )}
+                        {workers.map((w) => (
+                            <div
+                                key={w.key}
+                                className="rounded-md border border-border bg-canvas-subtle/40 overflow-hidden"
+                            >
+                                <div className="flex items-center gap-2 p-2">
+                                    <span
+                                        className={`w-2 h-2 rounded-full shrink-0 ${stateDot(w.state)}`}
+                                        title={w.state}
+                                    />
+                                    <span className="text-[13px] font-medium flex-1 truncate">
+                                        {w.label}
+                                    </span>
+                                    <WorkerStateBadge state={w.state}/>
                                 </div>
-                            );
-                        })}
+                                <div className="grid grid-cols-2 gap-x-3 gap-y-1 px-2 pb-2 text-[11px]">
+                                    <WorkerStat label="Started" value={formatDate(w.started_at)}/>
+                                    <WorkerStat label="Stopped" value={formatDate(w.stopped_at)}/>
+                                    <WorkerStat
+                                        label="Last action"
+                                        value={w.last_action_at ? timeAgo(w.last_action_at) : "—"}
+                                    />
+                                    <WorkerStat
+                                        label="Last error"
+                                        value={w.last_error_at ? timeAgo(w.last_error_at) : "—"}
+                                    />
+                                </div>
+                                {w.last_error && (
+                                    <div className="mx-2 mb-2 p-2 rounded bg-danger-subtle text-danger-fg text-[11px] font-mono max-h-[80px] overflow-auto whitespace-pre-wrap">
+                                        {w.last_error}
+                                    </div>
+                                )}
+                            </div>
+                        ))}
                     </div>
                 </div>
             </div>
@@ -515,18 +566,17 @@ export default function ManagementPage() {
                 </div>
                 <p className="text-[12px] text-fg-muted mb-3">
                     Calm background worker that walks the follower graph at a constant
-                    rate to grow the network — one bounded pass per hour window, so it
-                    never interferes with silent-mode processing.
+                    rate to grow the network — one bounded pass at a time, so it
+                    never interferes with silent-mode processing. Its pause/resume
+                    toggle lives in the Workers panel above.
                 </p>
 
                 {!discovery ? (
                     <div className="text-[13px] text-fg-subtle">Loading…</div>
                 ) : !discovery.enabled ? (
                     <div className="text-[13px] text-fg-subtle">
-                        Worker is disabled — set{" "}
-                        <code className="font-mono">DISCOVERY_WORKER_ENABLED=True</code> in{" "}
-                        <code className="font-mono">core/config.py</code> to grow the
-                        network automatically.
+                        Worker is paused — flip its toggle in the Workers panel above to
+                        resume network growth.
                     </div>
                 ) : !discovery.last_run ? (
                     <div className="text-[13px] text-fg-subtle">
@@ -535,15 +585,17 @@ export default function ManagementPage() {
                     </div>
                 ) : (
                     <>
-                        {/* Hourly budget usage of the last pass */}
+                        {/* Request rate of the last pass vs the hourly budget */}
                         <div className="mb-3">
                             <div className="flex items-center justify-between text-[12px] mb-1">
                                 <span className="text-fg-muted">
-                                    Hourly budget used (last pass)
+                                    Request rate vs hourly budget (last pass)
                                 </span>
                                 <span className="font-mono">
-                                    {discovery.last_run.requests ?? 0} /{" "}
-                                    {discovery.rate_limit_per_hour} req ·{" "}
+                                    {discovery.requests_per_hour != null
+                                        ? discovery.requests_per_hour
+                                        : "—"}{" "}
+                                    / {discovery.rate_limit_per_hour} req/h ·{" "}
                                     <span className="text-fg-subtle">
                                         {discovery.budget_percent}%
                                     </span>
@@ -552,9 +604,9 @@ export default function ManagementPage() {
                             <div className="h-2 rounded-full bg-border-muted overflow-hidden">
                                 <div
                                     className={`h-full rounded-full transition-all ${
-                                        discovery.budget_percent > 90
+                                        discovery.budget_percent > 100
                                             ? "bg-danger"
-                                            : discovery.budget_percent > 70
+                                            : discovery.budget_percent > 85
                                               ? "bg-attention"
                                               : "bg-success"
                                     }`}
@@ -621,7 +673,7 @@ export default function ManagementPage() {
                     <Bot size={15} className="text-fg-muted"/>
                     <h2 className="text-[14px] font-semibold">CLI equivalents</h2>
                     <a
-                        href="https://github.com/Lewickiy/github-follow-master"
+                        href="https://github.com/Lewickiy/github-social-agent"
                         target="_blank"
                         rel="noreferrer"
                         className="ml-auto text-[12px] text-accent hover:underline inline-flex items-center gap-1"
@@ -630,13 +682,102 @@ export default function ManagementPage() {
                     </a>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[12px]">
-                    <CodeBox code="python main.py --silent" desc="Stealth collect + score + follow"/>
+                    <CodeBox code="python main.py --silent" desc="Stealth collect + score (follows via FollowWorker)"/>
                     <CodeBox code="python main.py --collect" desc="Discover users + fetch repos"/>
                     <CodeBox code="python main.py --score" desc="Score / re-score users"/>
-                    <CodeBox code="python main.py --follow" desc="Follow top-scored users"/>
                 </div>
             </div>
         </div>
+    );
+}
+
+function stateDot(state: WorkerState): string {
+    switch (state) {
+        case "running":
+            return "bg-success animate-pulse";
+        case "paused":
+            return "bg-attention";
+        case "stopped":
+            return "bg-fg-subtle";
+        default:
+            return "bg-danger";
+    }
+}
+
+function WorkerStateBadge({state}: { state: WorkerState }) {
+    switch (state) {
+        case "running":
+            return (
+                <span className="badge bg-success-subtle text-success-fg border border-success/30">
+                    <span className="w-2 h-2 rounded-full bg-success animate-pulse"/>
+                    Running
+                </span>
+            );
+        case "paused":
+            return (
+                <span className="badge bg-attention-subtle text-attention border border-attention/30">
+                    <span className="w-2 h-2 rounded-full bg-attention"/>
+                    Paused
+                </span>
+            );
+        case "stopped":
+            return (
+                <span className="badge bg-canvas-subtle text-fg-muted border border-border">
+                    <span className="w-2 h-2 rounded-full bg-fg-subtle"/>
+                    Stopped
+                </span>
+            );
+        default:
+            return (
+                <span className="badge bg-canvas-subtle text-fg-muted border border-border">
+                    <span className="w-2 h-2 rounded-full bg-danger"/>
+                    Offline
+                </span>
+            );
+    }
+}
+
+function Switch({
+    checked,
+    disabled,
+    label,
+    onChange,
+}: {
+    checked: boolean;
+    disabled?: boolean;
+    label: string;
+    onChange: (checked: boolean) => void;
+}) {
+    return (
+        <button
+            type="button"
+            role="switch"
+            aria-checked={checked}
+            aria-label={label}
+            title={label}
+            disabled={disabled}
+            onClick={() => onChange(!checked)}
+            className={`relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full border transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed ${
+                checked ? "bg-success border-success" : "bg-border-muted border-border"
+            }`}
+        >
+            <span
+                className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform duration-150 ${
+                    checked ? "translate-x-[15px]" : "translate-x-[1px]"
+                }`}
+            />
+        </button>
+    );
+}
+
+function WorkerStat({label, value}: { label: string; value: string }) {
+    return (
+        <>
+            <span className="text-fg-subtle">{label}</span>
+            <span className="text-fg-muted font-mono text-right truncate" title={value}>
+        {value}
+      </span>
+        </>
     );
 }
 

@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -45,7 +46,12 @@ from api.queries import (
 )
 from core.config import DAILY_FOLLOW_LIMIT
 from core.database import Database
+from core.logger import get_logger
 from core.tz import DEFAULT_TIMEZONE, get_timezone_name, set_timezone, utc_offset_minutes
+from workers.registry import WORKERS
+from workers.runtime import ALIVE_WINDOW_SECONDS
+
+log = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -57,7 +63,6 @@ JOB_MODES = {
     "collect-users-rep": ["--collect-users-rep"],
     "collect-self": ["--collect-self"],
     "score": ["--score"],
-    "follow": ["--follow"],
     "silent": ["--silent"],
     "snapshot": ["--snapshot"],
 }
@@ -504,20 +509,210 @@ def settings_update(payload: SettingsUpdate):
 def config_view():
     import core.config as cfg
 
+    # The ML follow gate is runtime-tunable (settings table), so its
+    # effective values come from the DB, not the config module.
+    db = _db()
+    try:
+        ml_follow_gate_enabled = db.get_ml_follow_gate_enabled()
+        ml_follow_threshold = db.get_ml_follow_threshold()
+    finally:
+        db.conn.close()
+
     return {
         "my_username": cfg.MY_USERNAME,
         "daily_follow_limit": cfg.DAILY_FOLLOW_LIMIT,
-        "follow_delay": cfg.FOLLOW_DELAY,
+        "unfollow_after_days": cfg.UNFOLLOW_AFTER_DAYS,
+        "follow_interval_min_seconds": cfg.FOLLOW_INTERVAL_MIN_SECONDS,
+        "follow_interval_max_seconds": cfg.FOLLOW_INTERVAL_MAX_SECONDS,
         "score_threshold": cfg.SILENT_FOLLOW_SCORE_THRESHOLD,
         "current_score_version": cfg.CURRENT_SCORE_VERSION,
         "ml_enabled": cfg.ML_ENABLED,
         "ml_train_interval_hours": cfg.ML_TRAIN_INTERVAL_HOURS,
+        "ml_follow_gate_enabled": ml_follow_gate_enabled,
+        "ml_follow_threshold": ml_follow_threshold,
         "repo_freshness_days": cfg.REPO_FRESHNESS_DAYS,
         "owner_sync_days": cfg.OWNER_SYNC_DAYS,
         "score_freshness_days": cfg.SCORE_FRESHNESS_DAYS,
         "follower_scan_days": cfg.FOLLOWER_SCAN_DAYS,
         "prioritize_small": cfg.SILENT_PRIORITIZE_SMALL,
     }
+
+
+# ── ML follow gate (Management tab "strictness" dial) ────────────────────
+
+class MLFollowConfig(BaseModel):
+    enabled: bool | None = None
+    threshold: float | None = None
+
+
+_ml_recompute_lock = threading.Lock()
+_ml_recompute_thread: threading.Thread | None = None
+
+
+def _ml_follow_config_view(db):
+    """Effective gate values (settings-backed), for API responses."""
+    return {
+        "enabled": db.get_ml_follow_gate_enabled(),
+        "threshold": db.get_ml_follow_threshold(),
+    }
+
+
+def _kick_ml_recompute():
+    """Recompute all stored predictions in a background thread.
+
+    Called when the threshold changes so the FollowWorker gate and the
+    dashboard stat immediately reflect the new strictness (the recompute
+    is purely local — no GitHub API — and takes a few seconds for the
+    current population).  At most one recompute runs at a time.
+    """
+    global _ml_recompute_thread
+    with _ml_recompute_lock:
+        if (
+            _ml_recompute_thread is not None
+            and _ml_recompute_thread.is_alive()
+        ):
+            return
+
+        def _run():
+            from ml_service.recompute_predictions import recompute_all_predictions
+
+            rdb = Database()
+            try:
+                stats = recompute_all_predictions(rdb)
+                log.info(
+                    "ML recompute (threshold change): %d users — %d×1 / %d×0.",
+                    stats.get("total"), stats.get("pred_1"), stats.get("pred_0"),
+                )
+            except Exception:
+                log.exception("ML recompute (threshold change) failed")
+            finally:
+                rdb.conn.close()
+
+        _ml_recompute_thread = threading.Thread(
+            target=_run, daemon=True, name="MLRecomputeOnConfig",
+        )
+        _ml_recompute_thread.start()
+
+
+@app.put("/api/config/ml-follow")
+def ml_follow_config_set(payload: MLFollowConfig):
+    """Update the ML follow gate (switch / threshold).
+
+    Persists to settings — the FollowWorker picks both up on its next
+    cycle without a restart.  Changing the threshold also triggers a
+    background recompute of every stored prediction, so the gate and the
+    dashboard's "ML candidates" stat switch over immediately.
+
+    The recompute is best-effort: it is skipped when one is already
+    running (the bot process may be recomputing after a daily retrain).
+    In that case labels converge at the next scoring pass or retrain —
+    the FollowWorker never acts on a value older than the last recompute.
+    """
+    db = _db()
+    threshold_changed = False
+    try:
+        if payload.threshold is not None:
+            if not 0.0 <= payload.threshold <= 1.0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="ml_follow_threshold must be between 0 and 1.",
+                )
+            if abs(db.get_ml_follow_threshold() - payload.threshold) > 1e-6:
+                threshold_changed = True
+            db.set_ml_follow_config(threshold=payload.threshold)
+        if payload.enabled is not None:
+            db.set_ml_follow_config(gate_enabled=payload.enabled)
+        result = _ml_follow_config_view(db)
+    finally:
+        db.conn.close()
+
+    if threshold_changed:
+        _kick_ml_recompute()
+    return result
+
+
+# ── Worker control (background threads, dashboard Management tab) ─────────
+
+class WorkerToggle(BaseModel):
+    enabled: bool
+
+
+def _worker_item(meta, row):
+    """Merge registry metadata with a worker_status row into the API shape.
+
+    State semantics:
+      * ``stopped``  — the thread stopped cleanly (stopped_at set).
+      * ``running``  — started, not stopped, heartbeat fresh (alive now).
+      * ``paused``   — the same thread is alive but its toggle is off.
+      * ``unknown``  — started but the heartbeat went stale → the bot
+        process is down/crashed (or has not ticked yet).
+    """
+    started = row.get("started_at")
+    stopped = row.get("stopped_at")
+    heartbeat = row.get("heartbeat_at")
+    enabled = bool(row.get("enabled", True))
+
+    alive = bool(started) and not stopped and heartbeat is not None
+    if alive:
+        try:
+            age = (datetime.now(timezone.utc) -
+                   datetime.fromisoformat(heartbeat)).total_seconds()
+            alive = age < ALIVE_WINDOW_SECONDS
+        except (ValueError, TypeError):
+            alive = False
+
+    if stopped:
+        state = "stopped"
+    elif alive:
+        state = "running" if enabled else "paused"
+    else:
+        state = "unknown"
+
+    return {
+        "key": meta["key"],
+        "label": meta["label"],
+        "description": meta["description"],
+        "enabled": enabled,
+        "state": state,
+        "running": state == "running",
+        "started_at": started,
+        "stopped_at": stopped,
+        "last_action_at": row.get("last_action_at"),
+        "last_error_at": row.get("last_error_at"),
+        "last_error": row.get("last_error"),
+        "heartbeat_at": heartbeat,
+    }
+
+
+@app.get("/api/workers")
+def workers_view():
+    db = _db()
+    try:
+        rows = {w["name"]: w for w in db.worker_statuses()}
+    finally:
+        db.conn.close()
+    return {"items": [
+        _worker_item(meta, rows.get(meta["key"], {})) for meta in WORKERS
+    ]}
+
+
+@app.put("/api/workers/{key}")
+def worker_set(key: str, payload: WorkerToggle):
+    """Pause (enabled=false) or resume (enabled=true) a background worker."""
+    meta = next((w for w in WORKERS if w["key"] == key), None)
+    if meta is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown worker '{key}'. Allowed: "
+                   f"{', '.join(w['key'] for w in WORKERS)}",
+        )
+    db = _db()
+    try:
+        db.set_worker_enabled(key, payload.enabled)
+        row = db.worker_status(key) or {}
+    finally:
+        db.conn.close()
+    return _worker_item(meta, row)
 
 
 # ── Job control ───────────────────────────────────────────────────────────

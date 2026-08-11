@@ -4,6 +4,11 @@ Collects repos + scores users with human-like delays, and is designed to
 look like individual user browsing, not a mass crawl.  All delays are
 configurable in config.py (SILENT_* settings).
 
+Following is **not** done inline anymore: the dedicated FollowWorker
+daemon thread (``workers/follow_worker.py``) drains the follow queue
+independently at its own pace, so silent stays a pure collect + score
+pipeline.
+
 On top of the legacy one-shot behaviour it now:
   * waits for first-run readiness (``SILENT_GATES_ENABLED``) — at least
     one follower and enough owner repo data — instead of finishing with
@@ -13,16 +18,14 @@ On top of the legacy one-shot behaviour it now:
     work instead of stopping.  Follower-graph growth (new users beyond
     the owner's followers) is handled by a separate calm background
     worker (``workers/graph_discovery_worker.py``, ≤ DISCOVERY_*
-    requests/hour), so ``--collect*`` / ``--score`` / ``--follow`` are
-    only needed as one-off force/backfill modes.
+    requests/hour), so ``--collect*`` / ``--score`` are only needed as
+    one-off force/backfill modes.
 """
 
-import random
 import threading
 import time
 
 from core.config import (
-    DAILY_FOLLOW_LIMIT,
     ML_ENABLED,
     OWNER_FOLLOWER_SCAN_INTERVAL,
     READ_HEAVY_FORK_LANGUAGES,
@@ -31,8 +34,6 @@ from core.config import (
     SILENT_DELAY_BETWEEN_REPOS,
     SILENT_DELAY_BETWEEN_REQUESTS,
     SILENT_DELAY_BETWEEN_SCORES,
-    SILENT_DELAY_BETWEEN_FOLLOWS,
-    SILENT_FOLLOW_SCORE_THRESHOLD,
     SILENT_GATE_CHECK_INTERVAL_SECONDS,
     SILENT_GATES_ENABLED,
     SILENT_MIN_OWNER_REPOS,
@@ -52,28 +53,12 @@ from core.github_client import (
     should_fetch_languages,
 )
 from core.logger import get_logger
+from core.stealth import jitter
 
 from .collector import Collector
 from .scorer import Scorer
 
 log = get_logger(__name__)
-
-# Serialises the follow-queue drain across parallel SilentRunner workers
-# (see SILENT_WORKERS) so two workers never follow the same user or
-# overshoot the daily limit.  Reentrant — _drain_follow_queue() calls
-# _follow_user() while both may be wrapped by the same lock.
-_FOLLOW_LOCK = threading.RLock()
-
-
-def _jitter(seconds, factor=0.3):
-    """Add ±factor jitter to *seconds* to look more natural.
-
-    Clamps the lower bound to at least 1 second to avoid near-zero
-    delays that would defeat the stealth purpose.
-    """
-    lo = max(seconds * (1 - factor), 1)
-    hi = seconds * (1 + factor)
-    return random.uniform(lo, hi)
 
 
 class SilentRunner:
@@ -97,7 +82,7 @@ class SilentRunner:
 
     def _sleep(self, seconds):
         """Sleep with jitter, waking early on shutdown."""
-        actual = _jitter(seconds)
+        actual = jitter(seconds)
         deadline = time.monotonic() + actual
         while time.monotonic() < deadline:
             if self._shutdown.is_set():
@@ -543,87 +528,6 @@ class SilentRunner:
         return score
 
     # ------------------------------------------------------------------
-    # Auto-follow high-score users
-    # ------------------------------------------------------------------
-
-    def _follow_user(self, username, score):
-        """Follow *username* if daily budget allows.  Returns True on success.
-
-        Serialised across parallel silent workers via ``_FOLLOW_LOCK`` so
-        two workers never follow the same user concurrently or overshoot
-        the daily budget.
-        """
-        with _FOLLOW_LOCK:
-            return self._follow_user_unlocked(username, score)
-
-    def _follow_user_unlocked(self, username, score):
-        """Follow logic — run with ``_FOLLOW_LOCK`` already held."""
-        done_today = self.db.today_follows()
-        remaining = DAILY_FOLLOW_LIMIT - done_today
-        if remaining <= 0:
-            log.info("Daily follow limit reached (%d/%d).", done_today, DAILY_FOLLOW_LIMIT)
-            print(f"    ⛔ Daily follow limit reached ({done_today}/{DAILY_FOLLOW_LIMIT})")
-            return False
-
-        try:
-            if self.github.already_following(username):
-                # Mark as FOLLOWED so they don't stay in the queue forever.
-                # Uses the dedicated method (no FOLLOW action — this is a
-                # re-confirmation, not a new follow, so the daily-follow
-                # counter and activity feed stay accurate).
-                self.db.mark_followed_existing(username)
-                log.debug("Already following %s — marked FOLLOWED", username)
-                print(f"    👤 Already following {username}")
-                return False
-        except GitHubNetworkError as exc:
-            log.warning("Network error checking follow for %s: %s — skipping", username, exc)
-            print(f"    🌐 Network error checking {username} — skipping follow")
-            return False
-
-        try:
-            if self.github.follow(username):
-                self.db.mark_followed(username)
-                log.info("Followed %s (score %d)", username, score)
-                print(f"    🤝 Followed {username} (score {score}) [{done_today + 1}/{DAILY_FOLLOW_LIMIT}]")
-                return True
-            else:
-                log.warning("Failed to follow %s", username)
-                print(f"    ❌ Failed to follow {username}")
-                return False
-        except GitHubNetworkError as exc:
-            log.warning("Network error following %s: %s — skipping", username, exc)
-            print(f"    🌐 Network error following {username} — skipping")
-            return False
-
-    # ------------------------------------------------------------------
-    # Follow queue drain (FIFO)
-    # ------------------------------------------------------------------
-
-    def _drain_follow_queue(self):
-        """Follow queued users (FIFO) while daily limit allows.
-
-        Picks the earliest ``NEW`` user whose score meets the threshold
-        and attempts to follow them.  Loops until the queue is empty or
-        the daily limit is exhausted.
-
-        Note: ``_follow_user`` now marks already-followed users as
-        ``FOLLOWED`` internally, so they won't be re-queued.
-        """
-        while not self._shutdown.is_set():
-            row = self.db.get_next_queued_user(SILENT_FOLLOW_SCORE_THRESHOLD)
-            if not row:
-                return  # queue empty
-
-            username, score = row
-            if self._follow_user(username, score):
-                if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
-                    return
-            else:
-                # Limit exhausted, error, or already-following (handled
-                # inside _follow_user).  Stop draining regardless.
-                return
-
-    # ------------------------------------------------------------------
     # First-run gates & self-sustaining helpers
     # ------------------------------------------------------------------
 
@@ -773,8 +677,8 @@ class SilentRunner:
         its queue it polls for new owner followers and waits for new work
         instead of stopping.  Follower-graph growth is handled by the
         separate GraphDiscoveryWorker (started from main.py) — so
-        --collect* / --score / --follow are only needed as one-off
-        force/backfill modes.
+        --collect* / --score are only needed as one-off force/backfill
+        modes.
 
         Also periodically checks for new owner followers and processes
         them with priority.
@@ -855,52 +759,26 @@ class SilentRunner:
                             # Process new owner follower with priority display
                             self._collect_user_repos(pu, pu_idx, len(new_followers))
                             if not self._shutdown.is_set():
-                                pu_score = self._score_user(
+                                self._score_user(
                                     pu, owner_langs, owner_topics,
                                     ml_model=ml_model, ml_meta=ml_meta,
                                 )
-                                if (
-                                    pu_score is not None
-                                    and pu_score > SILENT_FOLLOW_SCORE_THRESHOLD
-                                    and not self._shutdown.is_set()
-                                ):
-                                    self._follow_user(pu, pu_score)
-                                    if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
-                                        break
-                                # Always drain queue after each owner follower
-                                # (harmless if limit exhausted — _follow_user checks)
-                                self._drain_follow_queue()
                 owner_scan_counter += 1
 
                 # --- Collect repos for this user (with TTL skip) ---
                 self._collect_user_repos(username, idx, total)
 
                 # --- Immediately score this user ---
+                # (Follows are handled by the dedicated FollowWorker thread —
+                #  see workers/follow_worker.py — not inline here.)
                 if not self._shutdown.is_set():
-                    score = self._score_user(
+                    self._score_user(
                         username, owner_langs, owner_topics,
                         ml_model=ml_model, ml_meta=ml_meta,
                     )
 
-                    # --- Auto-follow if score is high enough ---
-                    if (
-                        score is not None
-                        and score > SILENT_FOLLOW_SCORE_THRESHOLD
-                        and not self._shutdown.is_set()
-                    ):
-                        self._follow_user(username, score)
-                        if not self._sleep(SILENT_DELAY_BETWEEN_FOLLOWS):
-                            break
-                    # Drain queue before moving to next user (FIFO)
-                    # (harmless if limit exhausted — _follow_user checks internally)
-                    self._drain_follow_queue()
-
                 if not self._sleep(SILENT_DELAY_BETWEEN_USERS):
                     break
-
-            # ── Drain the follow queue for this batch ──
-            if not self._shutdown.is_set():
-                self._drain_follow_queue()
 
             if self._shutdown.is_set():
                 break
