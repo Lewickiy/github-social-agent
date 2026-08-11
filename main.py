@@ -33,6 +33,7 @@ from core.logger import get_logger
 from services.collector import Collector
 from services.scorer import Scorer
 from services.silent import SilentRunner
+from workers.attention_worker import AttentionWorker
 from workers.company_worker import CompanyWorker
 from workers.follow_worker import FollowWorker
 from workers.followback_check_worker import FollowbackCheckWorker
@@ -208,6 +209,7 @@ def main():
     long_running = {"--silent", "--collect", "--collect-users", "--collect-users-rep", "--score"}
     company_worker = None
     followback_worker = None
+    attention_worker = None
     follow_worker = None
     unfollow_worker = None
     ml_worker = None
@@ -222,6 +224,12 @@ def main():
         company_worker.start()
         followback_worker = FollowbackCheckWorker(_shutdown)
         followback_worker.start()
+        # Reacts to inbound attention: records interactions with the
+        # owner's repos (star / fork / issue / PR / comment / follow) and
+        # adds new actors to the pipeline.  Persisted interactions also
+        # protect already-followed users from the unfollow worker.
+        attention_worker = AttentionWorker(_shutdown)
+        attention_worker.start()
         # The ONLY follow executor in the system — silent and the other
         # workers never subscribe; this thread drains the follow queue at
         # its own human-like pace, independent of the analysis pipeline.

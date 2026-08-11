@@ -1,14 +1,9 @@
-"""On-demand check: has a user interacted with the owner's profile/repos?
+"""Interaction checks against the owner's profile / repositories.
 
-The unfollow worker asks this question before unfollowing a user who has
-been followed for a long time without following back: it keeps the user
-only when they demonstrably interacted with the owner — starred, forked,
-opened/closed issues or PRs, commented, reviewed, pushed, released, or
-followed the owner.
-
-The answer is a plain ``bool`` and is deliberately **not persisted**: the
-user asked for a True/False decision only, so nothing is written to the
-database here.
+The unfollow worker asks whether a long-followed user ever interacted
+with the owner (keeps them only when they demonstrably did); the
+attention worker persists every such interaction; and the one-shot
+backfill script recovers interaction history for the ML population.
 
 Source: ``GET /users/{username}/events/public`` — the user's public
 timeline, which GitHub caps at ~300 events over a 90-day window (3 pages
@@ -17,8 +12,14 @@ interaction).  A user whose only interaction is *older* than the window
 may be misjudged as inactive — a safe direction of error for an unfollow
 decision (we only ever keep someone we shouldn't, never the reverse).
 
-Cost: one request per user per check (the first 100-event page); early
-exit on the first matching event.
+* ``user_has_interacted_with_owner`` — the fast bool check (early exit
+  on the first matching event; one request for interactors, three for
+  non-).  The unfollow worker's answer is still a plain decision and
+  nothing is written by the check itself.
+* ``find_interactions_with_owner`` — returns every matching event (with
+  its real timestamp) for the attention-worker backfill.
+* ``event_matches`` / ``owner_repo_full_names`` — shared helpers used by
+  the attention worker's own event-timeline poll.
 """
 
 from core.logger import get_logger
@@ -46,8 +47,10 @@ _INTERACTION_EVENT_TYPES = frozenset({
 _MAX_EVENT_PAGES = 3
 
 
-def user_has_interacted_with_owner(github, username, owner, owner_repo_names=None):
-    """Return True when *username* interacted with *owner* or their repos.
+def find_interactions_with_owner(
+    github, username, owner, owner_repo_names=None, stop_at_first=False,
+):
+    """Return the events where *username* interacted with *owner* / their repos.
 
     *github*         — a ``GithubClient`` (its ``request`` raises
                        ``GitHubNetworkError`` / ``GitHubRateLimitError`` /
@@ -59,8 +62,17 @@ def user_has_interacted_with_owner(github, username, owner, owner_repo_names=Non
                        names (from the repositories table).  When None or
                        empty, they are loaded from the database, and if
                        that is empty too, fetched fresh from the API.
+    *stop_at_first*  — True for the fast ``user_has_interacted_with_owner``
+                       bool check (early exit on the first match — 1 page
+                       for interactors); False for the backfill script,
+                       which needs every matching event with its real
+                       timestamp.
+
+    Returns the list of raw matching event dicts (each carries ``id``,
+    ``type``, ``created_at`` and ``repo``), which callers can persist via
+    ``Database.record_interaction``.
     """
-    owner_repo_full = _owner_repo_full_names(github, owner, owner_repo_names)
+    owner_repo_full = owner_repo_full_names(github, owner, owner_repo_names)
     if not owner_repo_full:
         # Owner has no public repos — only a profile interaction
         # (followed the owner) can count.
@@ -69,6 +81,7 @@ def user_has_interacted_with_owner(github, username, owner, owner_repo_names=Non
             owner,
         )
 
+    matches = []
     page = 1
     while page <= _MAX_EVENT_PAGES:
         data = github.request(
@@ -77,23 +90,38 @@ def user_has_interacted_with_owner(github, username, owner, owner_repo_names=Non
             params={"per_page": 100, "page": page},
         )
         if not data:
-            return False
+            break
 
         for event in data:
-            if _event_matches(event, owner, owner_repo_full):
-                return True
+            if event_matches(event, owner, owner_repo_full):
+                if stop_at_first:
+                    return [event]
+                matches.append(event)
         page += 1
 
-    return False
+    return matches
 
 
-def _owner_repo_full_names(github, owner, owner_repo_names):
+def user_has_interacted_with_owner(github, username, owner, owner_repo_names=None):
+    """Return True when *username* interacted with *owner* or their repos.
+
+    Fast path over :func:`find_interactions_with_owner` — stops at the
+    first matching event (one page for interactors, three for non-).
+    """
+    return bool(
+        find_interactions_with_owner(
+            github, username, owner, owner_repo_names, stop_at_first=True,
+        )
+    )
+
+
+def owner_repo_full_names(github, owner, owner_repo_names=None):
     """Full ``owner/repo`` names for the owner's repositories.
 
-    Prefers the provided short names (database); falls back to a fresh
-    ``/users/{owner}/repos`` fetch when nothing is known — an empty repo
-    list must never be mistaken for "no interaction possible" (that would
-    unfollow everyone).
+    Prefers the provided short names (database); when None/empty they are
+    loaded from the database, and if that is empty too, fetched fresh from
+    the API — an empty repo list must never be mistaken for "no interaction
+    possible" (that would unfollow everyone).
     """
     short = [n for n in (owner_repo_names or []) if n]
     if not short:
@@ -124,7 +152,7 @@ def _owner_repo_full_names(github, owner, owner_repo_names):
         return set()
 
 
-def _event_matches(event, owner, owner_repo_full):
+def event_matches(event, owner, owner_repo_full):
     """True when *event* shows interaction with *owner* / their repos."""
     etype = event.get("type")
 
