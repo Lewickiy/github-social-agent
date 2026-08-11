@@ -135,6 +135,10 @@ def recompute_all_predictions(db, batch=DEFAULT_BATCH, limit=None, verbose=False
             vec = build_feature_vector(
                 profile_json, repo_agg, user_langs, user_topics,
                 top_langs, top_topics, feature_order,
+                # Source one-hot (issue #25); interactions excluded at
+                # inference for the same leak-avoidance reason as
+                # predict_single (no "before the follow" window yet).
+                discovered_from=db.get_discovered_from(username),
             )
             tensor = torch.tensor([vec], dtype=torch.float32)
             pred = int(model.predict(tensor, threshold=threshold).item())

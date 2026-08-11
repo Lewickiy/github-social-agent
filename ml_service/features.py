@@ -156,6 +156,97 @@ def extract_topic_features(user_topics, global_top_topics):
     return feats
 
 
+def extract_interaction_features(interactions):
+    """Extract interaction features (issue #25) — attention we received.
+
+    *interactions* is the list of dicts from ``Database.user_interactions_before``
+    (already filtered to events BEFORE the follow timestamp — temporal
+    hygiene is enforced by the caller, never here).
+
+    Features:
+      * ``interacted_with_us`` — binary: any persisted interaction before
+        the follow,
+      * per-event-type counts (stars / forks / issues / PRs / comments),
+        capped and log-normalised like the repo features.
+
+    Returns a dict of feature_name → float.
+    """
+    feats = {}
+    interactions = interactions or []
+
+    feats["interacted_with_us"] = 1.0 if interactions else 0.0
+
+    # GitHub event types → semantic bucket (issue #25 spec).
+    buckets = {
+        "stars": {"WatchEvent"},
+        "forks": {"ForkEvent"},
+        "issues": {"IssuesEvent"},
+        "prs": {"PullRequestEvent", "PullRequestReviewEvent"},
+        "comments": {"IssueCommentEvent", "CommitCommentEvent", "PullRequestReviewCommentEvent"},
+    }
+    counts = {name: 0 for name in buckets}
+    for it in interactions:
+        et = it.get("event_type") if isinstance(it, dict) else None
+        for name, types in buckets.items():
+            if et in types:
+                counts[name] += 1
+                break
+
+    for name, cnt in counts.items():
+        # Capped + log-normalised, mirroring the repo count features.
+        feats[f"interaction_{name}_log"] = _log1p_normalise(cnt, cap=10)
+
+    return feats
+
+
+# Fixed, ordered set of discovery-source categories (issue #25).  The raw
+# ``users.discovered_from`` column is NOT a clean category today: the graph
+# walk writes the scanned username as the value, and repo-content sources
+# use prefixed values.  ``normalise_source`` maps any raw value onto this
+# fixed set so the one-hot is stable across retrains.
+SOURCE_CATEGORIES = [
+    "stargazers",      # stargazers:owner/repo (issue #22)
+    "contributors",    # contributors:owner/repo (issue #22)
+    "repo_interaction",  # attention worker (issue #21)
+    "owner_followers", # follower scan
+    "self",            # the owner
+    "graph",           # anything else (follower-graph walk, unknown)
+]
+
+
+def normalise_source(discovered_from):
+    """Map a raw ``discovered_from`` value onto a fixed source category.
+
+    * ``stargazers:*`` → ``stargazers``
+    * ``contributors:*`` → ``contributors``
+    * ``repo_interaction`` / ``owner_followers`` / ``self`` as-is
+    * everything else (scanned usernames from the graph walk, None) →
+      ``graph``
+    """
+    if not discovered_from:
+        return "graph"
+    if discovered_from in ("stargazers", "contributors", "repo_interaction",
+                           "owner_followers", "self"):
+        return discovered_from
+    if discovered_from.startswith("stargazers:"):
+        return "stargazers"
+    if discovered_from.startswith("contributors:"):
+        return "contributors"
+    return "graph"
+
+
+def extract_source_features(discovered_from):
+    """One-hot discovery-source features (issue #25).
+
+    *discovered_from* is the raw ``users.discovered_from`` value (or None).
+    Normalised onto the fixed :data:`SOURCE_CATEGORIES` set so the model
+    can calibrate for the population shift between discovery channels and
+    evaluation can report per-channel AUC.
+    """
+    cat = normalise_source(discovered_from)
+    return {f"source_{c}": (1.0 if c == cat else 0.0) for c in SOURCE_CATEGORIES}
+
+
 # ── Public API ────────────────────────────────────────────────────────────
 
 def build_feature_vector(
@@ -166,6 +257,8 @@ def build_feature_vector(
     global_top_langs,
     global_top_topics,
     feature_order,
+    interactions=None,
+    discovered_from=None,
 ):
     """Build an ordered feature vector as a list of floats.
 
@@ -174,6 +267,12 @@ def build_feature_vector(
     All parameters correspond to data for a single user.
     *feature_order* is the list of feature names in the order
     expected by the model (saved during training).
+    *interactions* is the list of dicts from
+    ``Database.user_interactions_before`` (events BEFORE the follow —
+    temporal hygiene enforced by the caller).  *discovered_from* is the
+    raw ``users.discovered_from`` value for the one-hot source feature.
+    Both default to None (all-zero feature groups) for callers that
+    predate issue #25 or have no data.
 
     Returns
     -------
@@ -185,6 +284,8 @@ def build_feature_vector(
     feats.update(extract_repo_features(repo_agg))
     feats.update(extract_language_features(user_languages, global_top_langs))
     feats.update(extract_topic_features(user_topics, global_top_topics))
+    feats.update(extract_interaction_features(interactions))
+    feats.update(extract_source_features(discovered_from))
 
     return [feats.get(name, 0.0) for name in feature_order]
 
@@ -192,6 +293,7 @@ def build_feature_vector(
 def build_feature_vector_for_training(
     profile_json, repo_agg, user_languages, user_topics,
     global_top_langs, global_top_topics,
+    interactions=None, discovered_from=None,
 ):
     """Same as ``build_feature_vector`` but also returns feature names.
 
@@ -203,6 +305,8 @@ def build_feature_vector_for_training(
     feats.update(extract_repo_features(repo_agg))
     feats.update(extract_language_features(user_languages, global_top_langs))
     feats.update(extract_topic_features(user_topics, global_top_topics))
+    feats.update(extract_interaction_features(interactions))
+    feats.update(extract_source_features(discovered_from))
 
     # Sort by name for deterministic ordering
     names = sorted(feats.keys())

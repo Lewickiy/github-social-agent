@@ -85,6 +85,12 @@ def predict_single(model, metadata, db, username):
         vec = build_feature_vector(
             profile_json, repo_agg, user_langs, user_topics,
             top_langs, top_topics, metadata["feature_order"],
+            # Source one-hot (issue #25).  Interactions are deliberately
+            # not included here: at inference the user has NOT been
+            # followed yet, so there is no "before the follow" window —
+            # feeding today's interactions would leak future label
+            # information into the gate.
+            discovered_from=db.get_discovered_from(username),
         )
 
         tensor = torch.tensor([vec], dtype=torch.float32)

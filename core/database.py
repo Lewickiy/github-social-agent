@@ -1690,6 +1690,34 @@ class Database:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def get_followed_at(self, username):
+        """Time we followed *username* (from ``user_current_status``).
+
+        None when the user has never been followed — the ML feature
+        extractor treats that as "no follow yet" and falls back to no
+        interaction features (nothing to be temporally hygienic about).
+        """
+        row = self.conn.execute(
+            "SELECT followed_at FROM user_current_status WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def get_discovered_from(self, username):
+        """The raw ``users.discovered_from`` value for *username*.
+
+        May be a bare category (``owner_followers``, ``self``,
+        ``repo_interaction``), a prefixed value (``stargazers:owner/repo``,
+        ``contributors:owner/repo``) or a scanned username (the graph
+        walk writes the scanned user's login).  The ML source feature
+        normalises this to a fixed category set (issue #25).
+        """
+        row = self.conn.execute(
+            "SELECT discovered_from FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else None
+
     def user_interactions_before(self, username, ts):
         """Interactions of *username* with ``created_at <= ts`` (as-of query).
 
