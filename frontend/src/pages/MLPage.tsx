@@ -180,6 +180,66 @@ export default function MLPage() {
         </div>
       ) : (
         <>
+          {/* Trend verdict — is it time to invest in the model again? */}
+          {state.trend && (
+            <div className="card p-4">
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <TrendingUp size={15} className="text-fg-muted" />
+                <h2 className="text-[14px] font-semibold">
+                  Trend — when to invest in the model
+                </h2>
+                <span className="ml-auto">
+                  <span
+                    className={`badge border ${
+                      state.trend.level === "green"
+                        ? "bg-success-subtle text-success-fg border-success/30"
+                        : state.trend.level === "yellow"
+                        ? "bg-attention-subtle text-attention border-attention/30"
+                        : "bg-danger-subtle text-danger-fg border-danger/30"
+                    }`}
+                  >
+                    {state.trend.label}
+                  </span>
+                </span>
+              </div>
+              <p className="text-[13px] text-fg">{state.trend.verdict}</p>
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-x-6 gap-y-1">
+                <Metric
+                  label={`CV AUC — last ${state.trend.window_size} runs`}
+                  value={
+                    state.trend.recent_cv_auc.length > 0
+                      ? state.trend.recent_cv_auc.map((v) => v.toFixed(3)).join(" · ")
+                      : "—"
+                  }
+                  sub={`min ${state.trend.min_cv_auc?.toFixed(3) ?? "—"} · avg ${
+                    state.trend.avg_cv_auc?.toFixed(3) ?? "—"
+                  }`}
+                  highlight={
+                    state.trend.min_cv_auc != null &&
+                    state.trend.min_cv_auc >= 0.65
+                  }
+                />
+                <Metric
+                  label="Training samples"
+                  value={String(state.trend.samples ?? "—")}
+                  sub={`${state.trend.positives ?? "—"} positive labels`}
+                />
+                <Metric
+                  label="Latest CV precision"
+                  value={pct(state.trend.latest_cv_precision)}
+                  sub="at the model's decision point"
+                />
+              </div>
+              <p className="mt-3 text-[12px] text-fg-subtle">
+                Single-run metrics are noisy on small datasets, so the verdict
+                uses the last {state.trend.window_size} retrains together, not
+                the latest one alone. Green = all of them ≥ 0.65 CV AUC with ≥
+                1000 samples and ≥ 200 positives; yellow = on track (avg ≥ 0.60
+                with ≥ 700 samples); red = still too early.
+              </p>
+            </div>
+          )}
+
           {/* Current model */}
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-3">

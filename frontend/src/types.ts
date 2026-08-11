@@ -273,10 +273,29 @@ export interface MLDataset {
   training_positive_share_pct: number;
 }
 
+/** Green/yellow/red verdict: is it time to invest in the model again? */
+export interface MLTrend {
+  level: "green" | "yellow" | "red";
+  label: string;
+  verdict: string;
+  /** How many recent retrains the verdict is based on. */
+  window_size: number;
+  /** CV AUC of those retrains, newest first. */
+  recent_cv_auc: number[];
+  min_cv_auc: number | null;
+  avg_cv_auc: number | null;
+  /** Current training-label pool size / positive count. */
+  samples: number | null;
+  positives: number | null;
+  /** CV precision of the newest retrain in the window. */
+  latest_cv_precision: number | null;
+}
+
 export interface MLState {
   current_model: MLModelInfo | null;
   dataset: MLDataset;
   history: MLTrainingRun[];
+  trend: MLTrend;
 }
 
 /** One graph-discovery pass recorded by the background worker. */
