@@ -39,6 +39,7 @@ from workers.followback_check_worker import FollowbackCheckWorker
 from workers.graph_discovery_worker import GraphDiscoveryWorker
 from workers.ml_trainer import MLTrainerWorker
 from workers.snapshot_worker import SnapshotWorker, take_snapshot_now
+from workers.unfollow_worker import UnfollowWorker
 
 log = get_logger(__name__)
 
@@ -208,14 +209,15 @@ def main():
     company_worker = None
     followback_worker = None
     follow_worker = None
+    unfollow_worker = None
     ml_worker = None
     snapshot_worker = None
     if long_running & set(sys.argv):
         # All background workers start unconditionally — whether each one
         # actually does work is controlled at runtime by the Management-tab
         # toggle (worker_status.enabled, all active by default; see
-        # migration 027 and workers/runtime.py).  A paused worker simply
-        # waits, so it can be resumed from the UI without a restart.
+        # migration 027 + 028 and workers/runtime.py).  A paused worker
+        # simply waits, so it can be resumed from the UI without a restart.
         company_worker = CompanyWorker(_shutdown)
         company_worker.start()
         followback_worker = FollowbackCheckWorker(_shutdown)
@@ -228,6 +230,11 @@ def main():
         # FollowWorker (the daily budget is shared via the actions table).
         follow_worker = FollowWorker(_shutdown)
         follow_worker.start()
+        # The counterpart cleanup thread: unfollows long-stale follows
+        # that never followed back nor interacted with the owner.  Shares
+        # the same daily budget as FollowWorker (50 actions combined).
+        unfollow_worker = UnfollowWorker(_shutdown)
+        unfollow_worker.start()
         ml_worker = MLTrainerWorker(_shutdown)
         ml_worker.start()
         snapshot_worker = SnapshotWorker(_shutdown)

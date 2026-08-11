@@ -198,6 +198,23 @@ class Database:
         ).fetchone()
         return row[0] if row else None
 
+    def owner_repository_names(self):
+        """Return the owner's repository *short* names (from ``repositories``).
+
+        Used by the unfollow worker to decide whether a user interacted
+        with any of the owner's repos (GitHub events carry ``owner/repo``
+        full names, built from these).  Empty when the owner has no repos
+        collected yet — callers fall back to a live API fetch.
+        """
+        owner = self.get_owner()
+        if not owner:
+            return []
+        rows = self.conn.execute(
+            "SELECT name FROM repositories WHERE user_id = ?",
+            (owner,),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def store_full_profile(self, username, api_data):
         """Cache the full GitHub API user response as JSON.
 
@@ -1397,6 +1414,33 @@ class Database:
         ).fetchone()
         return row
 
+    def get_unfollow_candidates(self, min_age_days=7):
+        """Return a random user eligible for an inactive-unfollow, or None.
+
+        Eligible = current status FOLLOWED (we follow them, they never
+        followed back) and followed more than *min_age_days* ago.  Random
+        selection rotates through the pool so a single candidate that is
+        re-checked (e.g. one who did interact) isn't hit every cycle.
+
+        The caller re-verifies everything against the live GitHub API
+        before actually unfollowing (status can change in between).
+        """
+        row = self.conn.execute(
+            """
+            SELECT c.username
+            FROM user_current_status c
+            JOIN users u ON u.username = c.username
+            WHERE u.owner = 0
+              AND c.status = 'FOLLOWED'
+              AND c.followed_at IS NOT NULL
+              AND c.followed_at <= datetime('now', ?)
+            ORDER BY RANDOM()
+            LIMIT 1
+            """,
+            (f"-{min_age_days} days",),
+        ).fetchone()
+        return row[0] if row else None
+
     def current_status(self, username):
         """Return *username*'s current lifecycle status ('NEW' when none yet)."""
         row = self.conn.execute(
@@ -1435,6 +1479,20 @@ class Database:
         """
         if self._append_status(username, "UNFOLLOWED_AFTER_MUTUAL_FOLLOW"):
             self._log_action(username, "UNFOLLOWED")
+        self.conn.commit()
+
+    def mark_unfollowed_no_interaction(self, username):
+        """Mark *username* as unfollowed for never interacting with us.
+
+        The UnfollowWorker calls this after successfully unfollowing a
+        user who was followed 7+ days, never followed us back, and never
+        interacted with the owner's profile or repos.  Appends an
+        UNFOLLOWED_NO_INTERACTION transition and logs an UNFOLLOW event
+        (once per user) so the activity feed and the shared daily-budget
+        counter (``today_unfollows``) reflect it.
+        """
+        if self._append_status(username, "UNFOLLOWED_NO_INTERACTION"):
+            self._log_action(username, "UNFOLLOW")
         self.conn.commit()
 
     def get_user_companies(self, username):
@@ -1481,8 +1539,11 @@ class Database:
             any user who reciprocated is label=1.
           * label=0 — user was followed by us more than 7 days ago and
             never followed back (current status FOLLOWED with the FOLLOWED
-            transition older than 7 days).  The 7-day observation window
-            applies to the negative class only.
+            transition older than 7 days), plus users we actively
+            unfollowed for inactivity (UNFOLLOWED_NO_INTERACTION — they
+            never followed back either; keeping them labelled preserves
+            the negative pool as the unfollow worker cleans up).  The
+            7-day observation window applies to the negative class only.
 
         Only includes users who have been scored and have repo data.
 
@@ -1505,6 +1566,7 @@ class Database:
                     AND c.changed_at < datetime('now', '-7 days')
                 )
                 OR c.status = 'UNFOLLOWED_AFTER_MUTUAL_FOLLOW'
+                OR c.status = 'UNFOLLOWED_NO_INTERACTION'
             )
             AND u.score IS NOT NULL
             AND u.score > 0

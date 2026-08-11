@@ -135,6 +135,33 @@ FOLLOW_WORKER_ENABLED = True
 FOLLOW_WORKER_POLL_INTERVAL_SECONDS = 60
 
 # =====================================================
+# UNFOLLOW WORKER — inactive-follow cleanup thread
+# =====================================================
+
+# A dedicated daemon thread (workers/unfollow_worker.py) unfollows users
+# who were followed UNFOLLOW_AFTER_DAYS or more ago, never followed us
+# back, and never interacted with the owner's profile or repositories
+# (star / fork / issue / PR / comment / review / push / … — checked live
+# via the public events timeline, NOT persisted).  It paces unfollows at
+# the same random 20–30 min interval as the FollowWorker and draws from
+# the SAME daily budget (DAILY_FOLLOW_LIMIT, follows + unfollows combined).
+#
+# UNFOLLOW_WORKER_ENABLED only seeds the *fresh-install* default of the
+# Management-tab toggle (migration 028); at runtime the worker's
+# enabled/disabled state lives in the worker_status table and is
+# controlled from the dashboard like every other worker.
+UNFOLLOW_WORKER_ENABLED = True
+
+# How long (days) we keep a non-responding follow before it becomes
+# eligible for the unfollow worker.  Matches the ML negative-class
+# observation window (ML_MIN_* / get_training_users 7-day rule).
+UNFOLLOW_AFTER_DAYS = 7
+
+# Poll interval when no eligible users exist (the worker waits and
+# re-scans instead of burning API requests).
+UNFOLLOW_WORKER_POLL_INTERVAL_SECONDS = 60
+
+# =====================================================
 # OWNER FOLLOWER SCAN — cyclic check in silent mode
 # =====================================================
 

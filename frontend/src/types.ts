@@ -140,6 +140,8 @@ export interface LanguageOption {
 export interface Config {
   my_username: string;
   daily_follow_limit: number;
+  /** Days a non-responding follow is kept before the unfollow worker. */
+  unfollow_after_days: number;
   /** Random pause between two follow actions (seconds, range). */
   follow_interval_min_seconds: number;
   follow_interval_max_seconds: number;

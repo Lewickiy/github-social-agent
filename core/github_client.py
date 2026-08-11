@@ -428,6 +428,23 @@ class GithubClient:
     # Repositories & languages
     # --------------------------------------------------
 
+    def unfollow(self, username):
+        """Unfollow *username*.
+
+        Returns True when we no longer follow them — 204 (unfollowed) or
+        404 (we weren't following them anyway).  Rate limits / auth
+        failures raise like the rest of the client (the caller backs off
+        / aborts).
+        """
+        url = f"/user/following/{username}"
+        result = self.request("DELETE", url)
+        # 204 → request() returns True; 404 → returns None (already gone).
+        return result is True or result is None
+
+    # --------------------------------------------------
+    # Repositories & languages
+    # --------------------------------------------------
+
     def repos(self, username, etag=None):
         """Return all public repos for *username* (paginated).
 

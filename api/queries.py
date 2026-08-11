@@ -315,7 +315,8 @@ def status_distribution(db, days=None):
             JOIN users u ON u.username = h.username
             WHERE u.owner = 0
               AND h.status IN ('FOLLOWED', 'FOLLOWBACK',
-                               'UNFOLLOWED_AFTER_MUTUAL_FOLLOW', 'DELETED')
+                               'UNFOLLOWED_AFTER_MUTUAL_FOLLOW',
+                               'UNFOLLOWED_NO_INTERACTION', 'DELETED')
               AND h.changed_at >= ?
             GROUP BY h.status
             """,
@@ -328,6 +329,10 @@ def status_distribution(db, days=None):
             {
                 "status": "UNFOLLOWED_AFTER_MUTUAL_FOLLOW",
                 "count": d.get("UNFOLLOWED_AFTER_MUTUAL_FOLLOW", 0),
+            },
+            {
+                "status": "UNFOLLOWED_NO_INTERACTION",
+                "count": d.get("UNFOLLOWED_NO_INTERACTION", 0),
             },
             {"status": "DELETED", "count": d.get("DELETED", 0)},
         ]

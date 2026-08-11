@@ -22,6 +22,11 @@ export const STATUS_META: Record<
     cls: "bg-danger-subtle text-danger-fg border border-danger/30",
     dot: "bg-danger",
   },
+  UNFOLLOWED_NO_INTERACTION: {
+    label: "Unfollowed (no interaction)",
+    cls: "bg-attention-subtle text-attention border border-attention/30",
+    dot: "bg-attention",
+  },
   DELETED: {
     label: "Deleted",
     cls: "bg-canvas-subtle text-fg-muted border border-border-muted",
@@ -55,6 +60,10 @@ export const ACTION_META: Record<string, ActionMeta> = {
     label: "Unfollowed",
     cls: "bg-danger-subtle text-danger-fg border border-danger/30",
   },
+  UNFOLLOW: {
+    label: "Unfollowed (no interaction)",
+    cls: "bg-attention-subtle text-attention border border-attention/30",
+  },
   DELETED: {
     label: "Deleted",
     cls: "bg-canvas-subtle text-fg-muted border border-border",
@@ -75,6 +84,7 @@ export const STATUS_ORDER = [
   "FOLLOWED",
   "FOLLOWBACK",
   "UNFOLLOWED_AFTER_MUTUAL_FOLLOW",
+  "UNFOLLOWED_NO_INTERACTION",
   "DELETED",
 ];
 

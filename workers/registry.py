@@ -17,11 +17,20 @@ WORKERS = (
         ),
     },
     {
+        "key": "unfollow",
+        "label": "Unfollow",
+        "description": (
+            "Unfollows users followed 7+ days who never followed back and "
+            "never interacted with your profile or repos — same interval "
+            "and daily budget as follows."
+        ),
+    },
+    {
         "key": "graph_discovery",
         "label": "Graph discovery",
         "description": (
-            "Walks the follower graph at a calm rate (≤500 req/h) — one "
-            "bounded pass per hour to grow the network."
+            "Walks the follower graph at a calm, constant rate (≤500 req/h) "
+            "— one bounded pass at a time to grow the network."
         ),
     },
     {
