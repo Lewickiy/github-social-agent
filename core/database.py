@@ -1751,6 +1751,48 @@ class Database:
         )
         self.conn.commit()
 
+    def next_interactor_needing_reciprocation(self):
+        """Username of the oldest interactor still needing a reciprocal action.
+
+        An interactor "needs reciprocation" while any of their recorded
+        interactions has ``we_followed_back = 0`` or ``we_starred = 0``
+        (issue #24).  Deleted users are excluded (nothing to answer).
+        Returns None when everyone has been answered.
+        """
+        if not self._table_exists("interactions"):
+            return None
+        row = self.conn.execute(
+            """
+            SELECT i.username
+            FROM interactions i
+            LEFT JOIN user_current_status c ON c.username = i.username
+            WHERE (i.we_followed_back = 0 OR i.we_starred = 0)
+              AND COALESCE(c.status, 'NEW') != 'DELETED'
+            GROUP BY i.username
+            ORDER BY MIN(i.seen_at) ASC, MIN(i.id) ASC
+            LIMIT 1
+            """,
+        ).fetchone()
+        return row[0] if row else None
+
+    def mark_user_reciprocal(self, username, kind):
+        """Record a reciprocal action on ALL of *username*'s interactions.
+
+        *kind* is ``'star'`` or ``'follow'`` — mapped to ``we_starred`` /
+        ``we_followed_back`` (issue #24).  The reciprocal action applies to
+        the person, so every interaction they produced is stamped at once.
+        """
+        if kind not in ("star", "follow"):
+            return
+        if not self._table_exists("interactions"):
+            return
+        col = "we_starred" if kind == "star" else "we_followed_back"
+        self.conn.execute(
+            f"UPDATE interactions SET {col} = 1 WHERE username = ?",
+            (username,),
+        )
+        self.conn.commit()
+
     def list_interactions(self, limit=12, actor=None, event_type=None):
         """Most recent interactions, newest first (issue #23 dashboard feed).
 

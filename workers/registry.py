@@ -67,6 +67,15 @@ WORKERS = (
         ),
     },
     {
+        "key": "reciprocal",
+        "label": "Reciprocal",
+        "description": (
+            "Answers attention with attention: follows new interactors "
+            "and stars their most relevant repository, paced like follows "
+            "(20–30 min) within the shared daily budget."
+        ),
+    },
+    {
         "key": "snapshot",
         "label": "Snapshots",
         "description": (

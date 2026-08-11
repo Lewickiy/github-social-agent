@@ -270,6 +270,31 @@ ATTENTION_WORKER_ENABLED = True
 ATTENTION_POLL_INTERVAL_HOURS = 1
 
 # =====================================================
+# RECIPROCAL ACTIONS WORKER — answer attention with attention
+# =====================================================
+
+# A dedicated daemon thread (workers/reciprocal_worker.py) reacts to new
+# interactors recorded by the attention worker (issue #24): it follows them
+# (respecting the shared daily follow+unfollow budget and
+# ``SOCIAL_ACTION_LOCK``) and stars their most relevant repository (highest
+# stars / matching topics), paced with the same random 20-30 min interval
+# as the follow worker so the reciprocity never looks like spam.  Every
+# reciprocal action is recorded on the interaction (``we_followed_back`` /
+# ``we_starred``) so ML feature extraction can separate correlation from
+# causation (#25).
+#
+# Deliberately OPTIONAL and separate from the attention worker (#21): it
+# changes the bot's social behaviour, so it defaults to enabled but can be
+# toggled independently from the Management tab (worker_status table — the
+# flag below only seeds the fresh-install default, migration 031).
+RECIPROCAL_WORKER_ENABLED = True
+
+# How often (seconds) the worker re-polls the DB for new interactors when
+# the queue is empty (cheap, no API calls).  Real reciprocal actions are
+# paced by the same random 20-30 min interval as follows.
+RECIPROCAL_POLL_INTERVAL_SECONDS = 300
+
+# =====================================================
 # GRAPH DISCOVERY WORKER — separate calm background thread
 # =====================================================
 
