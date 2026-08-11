@@ -71,9 +71,9 @@ function StatusTick(props: any) {
   const label = STATUS_META[payload.value]?.label ?? payload.value;
   const lines = splitLabelLines(label, 12);
   return (
-    <text x={x} y={y} dy={12} textAnchor="middle" fill="#656d76" fontSize={10}>
+    <text x={x} y={y + 10} textAnchor="middle" fill="#656d76" fontSize={10}>
       {lines.map((line, i) => (
-        <tspan key={i} x={x} dy={i === 0 ? 0 : 10}>
+        <tspan key={i} x={x} dy={i === 0 ? 0 : 11}>
           {line}
         </tspan>
       ))}
@@ -109,12 +109,12 @@ export function StatusBars({ data }: { data: StatusCount[] }) {
   return (
     <div className="h-[200px] w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={ordered} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+        <BarChart data={ordered} margin={{ top: 8, right: 8, bottom: 8, left: -18 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#d0d7de" vertical={false} />
           <XAxis
             dataKey="status"
             interval={0}
-            height={38}
+            height={46}
             tick={<StatusTick />}
             tickLine={false}
             axisLine={{ stroke: "#d0d7de" }}
