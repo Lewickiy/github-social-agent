@@ -107,6 +107,12 @@ class FollowbackCheckWorker(threading.Thread):
             if self._shutdown.is_set():
                 return
 
+            # This check walks every mutual-follow user with API calls and
+            # can run for a long time — keep the heartbeat fresh so the
+            # dashboard shows "Running" instead of a stale-heartbeat
+            # "Offline" while the check is in progress.
+            touch_heartbeat(db, WORKER_KEY)
+
             # ── Check: does the user still follow us? ──
             try:
                 they_follow_us = github.does_user_follow_us(
@@ -127,6 +133,13 @@ class FollowbackCheckWorker(threading.Thread):
                     return
                 time.sleep(60)
                 continue
+            except GitHubAuthError as exc:
+                log.error(
+                    "AUTH FAILURE (%s) on %s — token revoked/expired. Aborting.",
+                    exc.status_code, exc.url,
+                )
+                self._shutdown.set()
+                return
 
             if not they_follow_us:
                 # User unfollowed us — update status.
