@@ -1751,6 +1751,44 @@ class Database:
         )
         self.conn.commit()
 
+    def list_interactions(self, limit=12, actor=None, event_type=None):
+        """Most recent interactions, newest first (issue #23 dashboard feed).
+
+        *actor* / *event_type* optionally narrow the feed (exact match —
+        the dashboard filter dropdown sends the raw values).  Returns an
+        empty list when the migration has not been applied.
+        """
+        if not self._table_exists("interactions"):
+            return []
+        sql = (
+            "SELECT username, event_type, repo_full_name, event_id, "
+            "created_at, seen_at, we_starred, we_followed_back "
+            "FROM interactions WHERE 1 = 1"
+        )
+        params = []
+        if actor:
+            sql += " AND username = ?"
+            params.append(actor)
+        if event_type:
+            sql += " AND event_type = ?"
+            params.append(event_type)
+        sql += " ORDER BY seen_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [
+            {
+                "username": r[0],
+                "event_type": r[1],
+                "repo_full_name": r[2],
+                "event_id": r[3],
+                "created_at": r[4],
+                "seen_at": r[5],
+                "we_starred": r[6],
+                "we_followed_back": r[7],
+            }
+            for r in rows
+        ]
+
     # --------------------------------------------------
     # ML — training data & predictions
     # --------------------------------------------------

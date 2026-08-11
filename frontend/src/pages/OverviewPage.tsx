@@ -15,7 +15,7 @@ import StatCard from "../components/StatCard";
 import FollowersChart from "../components/FollowersChart";
 import { ScoreBars, StatusBars } from "../components/DistributionCharts";
 import { usePolling } from "../hooks/usePolling";
-import { actionMeta } from "../status";
+import { actionMeta, interactionMeta } from "../status";
 import { useRefresh } from "../refresh";
 
 /**
@@ -306,7 +306,7 @@ export default function OverviewPage() {
         </div>
 
         {/* Recent activity — lifecycle event stream (no job info here) */}
-        <div className="card p-4 lg:col-span-2 min-w-0">
+        <div className="card p-4 min-w-0">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-[14px] font-semibold">Recent activity</h2>
             <Link to="/manage" className="text-[12px] text-accent hover:underline">
@@ -349,6 +349,56 @@ export default function OverviewPage() {
                   </a>
                   <span className="ml-auto text-[12px] text-fg-subtle shrink-0">
                     {timeAgo(a.created_at)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Interactions — people who starred/forked/opened issues or PRs
+            on our repositories (issue #23).  Same visual language as the
+            Recent activity feed; refreshed by the same polling. */}
+        <div className="card p-4 min-w-0">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[14px] font-semibold">Interactions</h2>
+            <span className="text-[12px] text-fg-subtle">
+              stars · forks · issues · PRs
+            </span>
+          </div>
+          <div className="divide-y divide-border-muted">
+            {stats.interactions.length === 0 && (
+              <div className="py-6 text-center text-[13px] text-fg-subtle">
+                No interactions yet — when someone stars, forks or opens an
+                issue on your repositories, they appear here.
+              </div>
+            )}
+            {stats.interactions.slice(0, 6).map((it) => {
+              const meta = interactionMeta(it.event_type);
+              return (
+                <div
+                  key={it.event_id}
+                  className="py-2 flex items-center gap-2.5 min-w-0"
+                >
+                  <span
+                    className={`badge ${meta.cls} shrink-0`}
+                    title={it.event_type}
+                  >
+                    {meta.label}
+                  </span>
+                  <a
+                    href={`https://github.com/${it.username}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[13px] font-medium text-accent hover:underline truncate min-w-0"
+                  >
+                    {it.username}
+                  </a>
+                  <span className="text-[12px] text-fg-muted truncate min-w-0 hidden sm:inline">
+                    {it.repo_full_name?.split("/")[1] ?? ""}
+                  </span>
+                  <span className="ml-auto text-[12px] text-fg-subtle shrink-0">
+                    {timeAgo(it.created_at)}
                   </span>
                 </div>
               );
