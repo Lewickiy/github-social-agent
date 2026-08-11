@@ -82,13 +82,17 @@ function StatusTick(props: any) {
 }
 
 export function StatusBars({ data }: { data: StatusCount[] }) {
-  // Always render every status in STATUS_ORDER (zero-filled), so columns
-  // stay consistent even when a status currently has no users.
+  // Issue #14: hide zero-value categories and order the visible bars from
+  // the largest value to the smallest (left → right), so the chart is
+  // scannable and never wastes space on empty columns.  With fewer bars
+  // rendered, each one scales to fill the whole allocated width.
   const counts = new Map(data.map((d) => [d.status, d.count]));
   const ordered = STATUS_ORDER.map((status) => ({
     status,
     count: counts.get(status) ?? 0,
-  }));
+  }))
+    .filter((entry) => entry.count > 0)
+    .sort((a, b) => b.count - a.count);
 
   return (
     <div className="h-[200px] w-full">
@@ -109,7 +113,10 @@ export function StatusBars({ data }: { data: StatusCount[] }) {
             contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #d0d7de" }}
             formatter={(v, _n, item) => [v, STATUS_META[item.payload.status]?.label ?? item.payload.status]}
           />
-          <Bar dataKey="count" radius={[3, 3, 0, 0]} maxBarSize={48}>
+          {/* No maxBarSize cap: the visible bars always fill the chart
+              width, re-scaling whenever the number of non-zero categories
+              changes (issue #14). */}
+          <Bar dataKey="count" radius={[3, 3, 0, 0]}>
             {ordered.map((entry) => (
               <Cell key={entry.status} fill={statusColor(entry.status)} />
             ))}
