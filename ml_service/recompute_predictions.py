@@ -33,6 +33,7 @@ Usage (inside the bot/dashboard container, which has torch):::
 import argparse
 import sys
 import time
+from datetime import datetime, timezone
 
 import torch
 
@@ -135,9 +136,16 @@ def recompute_all_predictions(db, batch=DEFAULT_BATCH, limit=None, verbose=False
             vec = build_feature_vector(
                 profile_json, repo_agg, user_langs, user_topics,
                 top_langs, top_topics, feature_order,
-                # Source one-hot (issue #25); interactions excluded at
-                # inference for the same leak-avoidance reason as
-                # predict_single (no "before the follow" window yet).
+                # Interaction + source features (issue #25).  The recompute
+                # population includes already-followed users, so the
+                # temporal cutoff is the follow time when there is one,
+                # else now (unfollowed candidates — every interaction so
+                # far precedes any future follow, so it is safe).
+                interactions=db.user_interactions_before(
+                    username,
+                    db.get_followed_at(username)
+                    or datetime.now(timezone.utc).isoformat(),
+                ),
                 discovered_from=db.get_discovered_from(username),
             )
             tensor = torch.tensor([vec], dtype=torch.float32)

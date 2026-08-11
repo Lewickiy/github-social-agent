@@ -61,13 +61,19 @@ def _per_source_auc(db, metadata, training):
     self / graph) and reports each channel's size and AUC, so the
     evaluation shows whether the model discriminates within each
     discovery channel rather than just overall.
+
+    *metadata* is the already-loaded model metadata (the caller has the
+    model loaded — no second disk read here).
     """
     from ml_service.features import normalise_source
     from ml_service.trainer import _classification_metrics
 
-    model, meta = load_model()
+    model, _meta = load_model()
     if model is None:
         return []
+    # Use the caller's metadata (already loaded) for feature names —
+    # never re-read the model directory mid-evaluation.
+    meta = metadata
     top_langs = [(n, 0) for n in meta["top_languages"]]
     top_topics = [(n, 0) for n in meta["top_topics"]]
 
