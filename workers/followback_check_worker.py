@@ -22,6 +22,7 @@ from workers.runtime import (
     mark_started,
     mark_stopped,
     sleep_interruptible,
+    touch_heartbeat,
     wait_until_enabled,
 )
 
@@ -93,7 +94,11 @@ class FollowbackCheckWorker(threading.Thread):
 
     def _check_all(self, db, github):
         """Walk every mutual-follow user and detect unfollowers."""
-        from core.github_client import GitHubNetworkError, GitHubRateLimitError
+        from core.github_client import (
+            GitHubAuthError,
+            GitHubNetworkError,
+            GitHubRateLimitError,
+        )
 
         users = db.get_mutual_follow_users()
         if not users:

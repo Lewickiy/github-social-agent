@@ -36,6 +36,7 @@ from workers.runtime import (
     mark_started,
     mark_stopped,
     sleep_interruptible,
+    touch_heartbeat,
     wait_until_enabled,
 )
 
@@ -166,6 +167,28 @@ class GraphDiscoveryWorker(threading.Thread):
             db.conn.close()
             log.info("Graph discovery worker stopped.")
 
+    def _heartbeat_loop(self, stop_event):
+        """Keep the dashboard's "Running" state honest during a pass.
+
+        ``_run_pass`` spends hours in plain ``time.sleep`` calls inside
+        the collector, so without this companion thread the worker_status
+        heartbeat would go stale within 5 minutes and the UI would show
+        the worker as offline while it is actually working.
+
+        Uses its own Database connection — SQLite connections are not
+        thread-safe, and the main worker thread is writing through the
+        shared ``db`` for the whole pass.
+        """
+        from core.database import Database
+
+        hb_db = Database()
+        try:
+            while not stop_event.is_set():
+                touch_heartbeat(hb_db, WORKER_KEY)
+                time.sleep(30)
+        finally:
+            hb_db.conn.close()
+
     def _run_pass(self, db, github, delay):
         """Walk one bounded slice of the follower graph and record it.
 
@@ -175,6 +198,18 @@ class GraphDiscoveryWorker(threading.Thread):
         against ``DISCOVERY_RATE_LIMIT_PER_HOUR``.
         """
         from services.collector import Collector
+
+        # Heartbeat companion: the pass sleeps with plain time.sleep()
+        # inside the collector, so a daemon thread keeps touching the
+        # worker_status heartbeat (→ dashboard "Running").
+        stop_heartbeat = threading.Event()
+        heartbeat = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(stop_heartbeat,),
+            daemon=True,
+            name="GraphDiscoveryHeartbeat",
+        )
+        heartbeat.start()
 
         counter = _RequestCounter(github)
         collector = Collector(db, counter, shutdown_event=self._shutdown)
@@ -188,6 +223,8 @@ class GraphDiscoveryWorker(threading.Thread):
                 stats=stats,
             )
         finally:
+            stop_heartbeat.set()
+            heartbeat.join(timeout=5)
             duration = time.monotonic() - start
             db.record_discovery_run(
                 {
