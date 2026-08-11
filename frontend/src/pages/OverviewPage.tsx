@@ -179,7 +179,9 @@ export default function OverviewPage() {
         </div>
       </div>
 
-      {/* KPI cards */}
+      {/* KPI cards — fixed pipeline-flow layout (issue #18).
+          Top row:    Users discovered → Follows/Unfollows → Following now → Followbacks
+          Bottom row: Scored → ML followback candidates → GitHub API requests (4th slot empty) */}
       <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
         <StatCard
           label="Users discovered"
@@ -187,11 +189,21 @@ export default function OverviewPage() {
           icon={<Users size={16} />}
           sub={`${t.queue.toLocaleString()} awaiting processing`}
         />
+        {/* Combined card (issue #15): follows in green, unfollows in red,
+            black slash between, and the shared daily budget on the sub-line.
+            No accent: the value is fully colored by its own spans and the
+            budget pressure already reads numerically in the sub-line. */}
         <StatCard
-          label="Scored"
-          value={t.scored}
-          icon={<Target size={16} />}
-          sub={`${t.scored_positive.toLocaleString()} with score > 0`}
+          label="Follows/Unfollows"
+          value={
+            <span className="inline-flex items-baseline gap-x-1">
+              <span className="text-success-fg">{stats.today_follows}</span>
+              <span className="text-fg">/</span>
+              <span className="text-danger-fg">{stats.today_unfollows}</span>
+            </span>
+          }
+          icon={<TrendingUp size={16} />}
+          sub={`${combinedToday}/${stats.daily_limit} combined`}
         />
         {/* Pipeline-state metric (issue #16): how many users are in the
             followed status — NOT how many follow actions were performed
@@ -216,21 +228,11 @@ export default function OverviewPage() {
               : "waiting for follows…"
           }
         />
-        {/* Combined card (issue #15): follows in green, unfollows in red,
-            black slash between, and the shared daily budget on the sub-line.
-            No accent: the value is fully colored by its own spans and the
-            budget pressure already reads numerically in the sub-line. */}
         <StatCard
-          label="Follows/Unfollows"
-          value={
-            <span className="inline-flex items-baseline gap-x-1">
-              <span className="text-success-fg">{stats.today_follows}</span>
-              <span className="text-fg">/</span>
-              <span className="text-danger-fg">{stats.today_unfollows}</span>
-            </span>
-          }
-          icon={<TrendingUp size={16} />}
-          sub={`${combinedToday}/${stats.daily_limit} combined`}
+          label="Scored"
+          value={t.scored}
+          icon={<Target size={16} />}
+          sub={`${t.scored_positive.toLocaleString()} with score > 0`}
         />
         <StatCard
           label="ML followback candidates"
