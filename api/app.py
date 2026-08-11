@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,7 +69,28 @@ JOB_MODES = {
     "snapshot": ["--snapshot"],
 }
 
-app = FastAPI(title="GitHub Social Dashboard", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Apply pending DB migrations before the dashboard serves requests.
+
+    The bot container auto-migrates on startup (main.py); the dashboard
+    does the same here so a fresh deploy works immediately and both
+    containers converge.  The runner is lock-serialized, so simultaneous
+    startup of bot + dashboard is safe (the second simply sees nothing
+    pending).  A migration failure is fatal on purpose: serving queries
+    against a stale schema would be worse than not serving at all.
+    """
+    try:
+        from migrations.runner import migrate
+        migrate()
+        log.info("Dashboard startup: database migrations applied.")
+    except Exception:
+        log.exception("Dashboard startup: automatic migration failed")
+        raise
+    yield
+
+
+app = FastAPI(title="GitHub Social Dashboard", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
