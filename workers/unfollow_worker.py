@@ -295,7 +295,19 @@ class UnfollowWorker(threading.Thread):
             )
             return "kept"
 
-        # ── Safety 2: did they interact with the owner profile/repos? ──
+        # ── Safety 2a: persisted interaction (attention worker)? ──
+        # The attention worker records every interaction with the owner's
+        # repos in the interactions table; a user with one must never be
+        # unfollowed.  This is a free DB-only check, so it runs before the
+        # expensive live events scan.
+        if db.user_has_persisted_interaction(username):
+            log.info(
+                "%s has a persisted interaction with the owner — "
+                "keeping (no unfollow)", username,
+            )
+            return "kept"
+
+        # ── Safety 2b: live interaction check against the owner ──
         from services.interactions import user_has_interacted_with_owner
 
         owner_repo_names = db.owner_repository_names()

@@ -472,6 +472,7 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
       <li><a href="#demo">Demo</a></li>
       <li><a href="#scoring">Scoring</a></li>
       <li><a href="#ml">ML</a></li>
+      <li><a href="#features">Features</a></li>
       <li><a href="#architecture">Architecture</a></li>
     </ul>
     <div class="nav-actions">
@@ -489,7 +490,7 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
 <!-- ================= HERO ================= -->
 <section class="hero container" aria-label="Intro">
   <div class="hero-copy">
-    <span class="badge reveal"><span class="dot"></span> Developer discovery engine · v0.1</span>
+    <span class="badge reveal"><span class="dot"></span> Developer discovery engine · v1.1</span>
     <h1 class="reveal" data-delay="60">Find developers who <span class="grad">build like you</span></h1>
     <p class="sub reveal" data-delay="120">GitHub Social Agent discovers developers with similar technologies, projects, and interests — helping you build a meaningful technical network.</p>
     <div class="hero-cta reveal" data-delay="180">
@@ -501,7 +502,7 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
     </div>
     <div class="hero-chips reveal" data-delay="240">
       <span class="chip"><i class="c-green"></i>0–100 similarity score</span>
-      <span class="chip"><i class="c-purple"></i>shadow-mode ML</span>
+      <span class="chip"><i class="c-purple"></i>ML follow gate (opt-in)</span>
       <span class="chip"><i class="c-blue"></i>local-first SQLite</span>
       <span class="chip"><i class="c-gray"></i>self-growing graph</span>
     </div>
@@ -551,8 +552,8 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
       <div class="sol-card card reveal">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M8 11h6M11 8v6"/></svg></div>
         <h3>Discover</h3>
-        <p>Traverses follower networks and discovers new developers.</p>
-        <span class="tag">follower graph</span>
+        <p>Walks the follower graph and mines your own repos for stargazers and contributors.</p>
+        <span class="tag">follower graph · repo fans</span>
       </div>
       <div class="sol-card card reveal" data-delay="80">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></div>
@@ -569,8 +570,8 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
       <div class="sol-card card reveal" data-delay="240">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></div>
         <h3>Connect</h3>
-        <p>Can automatically follow relevant developers within configured limits.</p>
-        <span class="tag">automated networking</span>
+        <p>Follows top candidates, answers attention with follow-backs and stars, and cleans up stale follows.</p>
+        <span class="tag">follow · unfollow · reciprocal</span>
       </div>
     </div>
   </div>
@@ -587,7 +588,7 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
       <div class="how-step card reveal">
         <div class="num">01</div>
         <h3>GitHub API</h3>
-        <p>Collector and discovery workers read profile, repository, and follower data within rate limits.</p>
+        <p>Collector, discovery and attention workers read profile, repository, follower and event data within rate limits.</p>
         <span class="tag">api.github.com</span>
       </div>
       <div class="how-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
@@ -615,8 +616,8 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
       <div class="how-step card reveal" data-delay="320">
         <div class="num">05</div>
         <h3>Ranked Developers</h3>
-        <p>Top matches are surfaced — and can be followed within configured daily limits.</p>
-        <span class="tag">DAILY_FOLLOW_LIMIT</span>
+        <p>A dedicated FollowWorker follows top matches within the shared daily limit — stale follows are cleaned up, and attention is answered with follow-backs and stars.</p>
+        <span class="tag">DAILY_FOLLOW_LIMIT · ML gate</span>
       </div>
     </div>
   </div>
@@ -791,23 +792,23 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
   <div class="container">
     <div class="sec-head reveal">
       <span class="label"><i></i>Machine learning</span>
-      <h2>Experimental <span class="grad">machine learning</span> layer</h2>
+      <h2>Follow-back prediction with <span class="grad">machine learning</span></h2>
     </div>
     <div class="ml-wrap">
       <div class="ml-copy">
-        <p>The project includes an ML model that learns from <b>historical follow decisions</b> and evaluates prediction quality on real GitHub data.</p>
-        <p>The model currently runs in <b>shadow mode</b> — its predictions are logged and evaluated, but never used to make decisions.</p>
-        <span class="shadow-badge"><span class="dot"></span>SHADOW MODE · predictions logged, not applied</span>
-        <p style="margin-top:18px;font-size:13.5px;color:var(--text-3)">Production decisions are still controlled by the deterministic scoring system.</p>
+        <p>The project includes a PyTorch model that learns from <b>historical follow-back outcomes</b> — who followed you back and who did not — using profile, repository, <b>interaction</b> and <b>discovery-source</b> features.</p>
+        <p>By default the model runs in <b>shadow mode</b> — predictions are logged and evaluated, but not applied. An optional <b>ML follow gate</b> (off by default) can make the model a hard second opinion on every follow.</p>
+        <span class="shadow-badge"><span class="dot"></span>SHADOW MODE BY DEFAULT · optional follow gate</span>
+        <p style="margin-top:18px;font-size:13.5px;color:var(--text-3)">Follow decisions are still controlled by the deterministic scoring system — unless you enable the follow gate from the dashboard.</p>
       </div>
       <div class="ml-pipe">
-        <div class="ml-step card"><div class="num">1</div><div><h3>Historical Data</h3><p>Past follow decisions and profile signals become training examples.</p></div></div>
+        <div class="ml-step card"><div class="num">1</div><div><h3>Historical Data</h3><p>Follow-back outcomes, profile signals, interactions and discovery source become training examples.</p></div></div>
         <div class="ml-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>
-        <div class="ml-step card"><div class="num">2</div><div><h3>ML Training</h3><p>A PyTorch model learns which signals predict a good connection.</p></div></div>
+        <div class="ml-step card"><div class="num">2</div><div><h3>ML Training</h3><p>A PyTorch model is retrained on startup and every 24 hours.</p></div></div>
         <div class="ml-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>
-        <div class="ml-step card"><div class="num">3</div><div><h3>Prediction Evaluation</h3><p>Precision and recall are measured against real GitHub outcomes.</p></div></div>
+        <div class="ml-step card"><div class="num">3</div><div><h3>Prediction Evaluation</h3><p>Stratified 5-fold cross-validation gives an honest quality estimate.</p></div></div>
         <div class="ml-conn" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div>
-        <div class="ml-step card"><div class="num">4</div><div><h3>Quality Analysis</h3><p>Metrics decide whether the model is ever promoted out of shadow mode.</p></div></div>
+        <div class="ml-step card"><div class="num">4</div><div><h3>Follow Gate</h3><p>An optional runtime dial applies the model to follow decisions when enabled.</p></div></div>
       </div>
     </div>
   </div>
@@ -825,14 +826,14 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
       <div class="feat-card card reveal">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M19.1 4.9l-2.8 2.8M7.7 16.3l-2.8 2.8"/></svg></div>
         <h3>Self-growing discovery</h3>
-        <p>Continuously discovers new developers through follower networks.</p>
+        <p>Continuously discovers new developers through the follower graph and your own repo stargazers and contributors.</p>
         <span class="tag">DISCOVERY_RATE_LIMIT_PER_HOUR</span>
       </div>
       <div class="feat-card card reveal" data-delay="60">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10M12 6V4M4 20V14M20 20V8M4 20h16"/><path d="M12 10l-2-2M12 6l2-2M4 14l-2 2"/></svg></div>
         <h3>Rate-limit aware</h3>
         <p>Designed around GitHub API constraints with retries and cooldowns.</p>
-        <span class="tag">401/403 retry · 2h cooldown</span>
+        <span class="tag">Retry-After · backoff · cooldown</span>
       </div>
       <div class="feat-card card reveal" data-delay="120">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></div>
@@ -849,14 +850,31 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
       <div class="feat-card card reveal" data-delay="240">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15v-3M12 15V9M17 15v-6"/></svg></div>
         <h3>Dashboard</h3>
-        <p>Provides a web interface for exploring collected data.</p>
+        <p>KPIs, candidate profiles, ML state and live worker control — pause or resume any of the nine background workers.</p>
         <span class="tag">FastAPI · React</span>
-      </div>
-      <div class="feat-card card reveal" data-delay="300">
+      </div>        <div class="feat-card card reveal" data-delay="300">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><path d="M12 2v10"/></svg></div>
         <h3>Graceful operation</h3>
         <p>Supports safe shutdown and persistent progress.</p>
         <span class="tag">SIGINT · SIGTERM</span>
+      </div>
+      <div class="feat-card card reveal" data-delay="360">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+        <h3>Answers attention</h3>
+        <p>Stars, forks, issues and PRs on your repos are answered with a follow-back and a star on the most relevant repository.</p>
+        <span class="tag">attention + reciprocal workers</span>
+      </div>
+      <div class="feat-card card reveal" data-delay="420">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></div>
+        <h3>Inactive-follow cleanup</h3>
+        <p>A dedicated worker unfollows long-stale follows that never followed back and never interacted with your profile or repos.</p>
+        <span class="tag">unfollow worker</span>
+      </div>
+      <div class="feat-card card reveal" data-delay="480">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></div>
+        <h3>ML follow gate</h3>
+        <p>An optional second opinion: candidates the model doesn't believe will follow back are skipped, saving the daily budget.</p>
+        <span class="tag">opt-in · off by default</span>
       </div>
     </div>
   </div>
@@ -868,10 +886,10 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
     <div class="sec-head center reveal">
       <span class="label"><i></i>Architecture</span>
       <h2>How the system is <span class="grad">wired together</span></h2>
-      <p class="lead">Workers collect data, the scoring engine ranks it, and the ML model watches from shadow mode.</p>
+      <p class="lead">Workers collect data, the scoring engine ranks it, social workers act on it, and the ML model watches from shadow mode.</p>
     </div>
     <div class="arch-scroll reveal">
-      <svg viewBox="0 0 760 580" role="img" aria-label="Architecture diagram">
+      <svg viewBox="0 0 760 680" role="img" aria-label="Architecture diagram">
         <defs>
           <marker id="arrG" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
             <path d="M0 0 L6 3 L0 6 Z" fill="rgba(46,160,67,.65)"/>
@@ -889,7 +907,7 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
 
         <rect class="arch-box hot" x="280" y="116" width="200" height="52" rx="10"/>
         <text class="arch-t" x="380" y="137">Discovery Engine</text>
-        <text class="arch-s" x="380" y="154">traverses follower graph</text>
+        <text class="arch-s" x="380" y="154">follower graph + repo stargazers</text>
 
         <path class="flow" d="M380 168 V192 M380 192 H230 M230 192 V226" marker-end="url(#arrG)"/>
         <path class="flow blue" d="M380 192 H530 M530 192 V226" marker-end="url(#arrB)"/>
@@ -900,7 +918,7 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
 
         <rect class="arch-box" x="440" y="226" width="180" height="52" rx="10"/>
         <text class="arch-t" x="530" y="247">Graph Discovery</text>
-        <text class="arch-s" x="530" y="264">follower network growth</text>
+        <text class="arch-s" x="530" y="264">follower graph · repo fans</text>
 
         <path class="flow" d="M230 278 V302 M230 302 H380 M380 302 V336" marker-end="url(#arrG)"/>
         <path class="flow blue" d="M530 278 V302 M530 302 H380"/>
@@ -911,18 +929,24 @@ footer{border-top:1px solid var(--border);padding:56px 0 44px;position:relative;
 
         <path class="flow" d="M380 388 V426" marker-end="url(#arrG)"/>
 
-        <rect class="arch-box ml" x="280" y="426" width="200" height="52" rx="10"/>
-        <text class="arch-t" x="380" y="447">ML Shadow Model</text>
-        <text class="arch-s" x="380" y="464">predictions logged · not applied</text>
+        <rect class="arch-box hot" x="280" y="426" width="200" height="52" rx="10"/>
+        <text class="arch-t" x="380" y="447">Social Actions</text>
+        <text class="arch-s" x="380" y="464">follow · unfollow · reciprocal</text>
 
         <path class="flow" d="M380 478 V516" marker-end="url(#arrG)"/>
 
-        <rect class="arch-box" x="280" y="516" width="200" height="48" rx="10"/>
-        <text class="arch-t" x="380" y="535">Dashboard</text>
-        <text class="arch-s" x="380" y="552">explore collected data</text>
+        <rect class="arch-box ml" x="280" y="516" width="200" height="52" rx="10"/>
+        <text class="arch-t" x="380" y="537">ML Model</text>
+        <text class="arch-s" x="380" y="554">shadow mode · optional follow gate</text>
+
+        <path class="flow" d="M380 568 V606" marker-end="url(#arrG)"/>
+
+        <rect class="arch-box" x="280" y="606" width="200" height="48" rx="10"/>
+        <text class="arch-t" x="380" y="625">Dashboard</text>
+        <text class="arch-s" x="380" y="642">KPIs · users · ML · worker control</text>
       </svg>
     </div>
-    <p class="arch-cap reveal">data flow: <code>GitHub API</code> → <code>Discovery Engine</code> → <code>Scoring Engine</code> → <code>ML Shadow Model</code> → <code>Dashboard</code></p>
+    <p class="arch-cap reveal">data flow: <code>GitHub API</code> → <code>Discovery</code> → <code>Scoring</code> → <code>Social Actions</code> (follow · unfollow · reciprocal) → back to <code>GitHub API</code> — while the <code>ML model</code> trains in shadow mode and can gate follows when enabled. The <code>Dashboard</code> monitors everything.</p>
   </div>
 </section>
 
@@ -1062,7 +1086,7 @@ if(wrap&&canvas&&canvas.getContext){
   var PIPE=[
     {label:'Your GitHub Profile',sub:'owner baseline'},
     {label:'Technology Fingerprint',sub:'languages · topics'},
-    {label:'Developer Discovery Graph',sub:'follower network'},
+    {label:'Developer Discovery Graph',sub:'follower graph · repo fans'},
     {label:'Relevant Connections',sub:'ranked by similarity'}
   ];
   var DEVS=[

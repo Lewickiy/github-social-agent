@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  Activity,
   Gauge,
   HeartHandshake,
   Sparkles,
   Target,
   TrendingUp,
   UserCheck,
-  UserMinus,
   Users,
 } from "lucide-react";
 import { api, timeAgo } from "../api";
@@ -17,13 +15,13 @@ import StatCard from "../components/StatCard";
 import FollowersChart from "../components/FollowersChart";
 import { ScoreBars, StatusBars } from "../components/DistributionCharts";
 import { usePolling } from "../hooks/usePolling";
-import { actionMeta } from "../status";
+import { actionMeta, interactionMeta } from "../status";
 import { useRefresh } from "../refresh";
 
 /**
- * Data window for the interval-dependent blocks (activity count + the
- * Recent activity feed).  The Followers growth chart is deliberately NOT
- * scoped by this — it always covers a fixed 30-day snapshot window.
+ * Data window for the interval-dependent blocks (the Recent activity
+ * feed).  The Followers growth chart is deliberately NOT scoped by this
+ * — it always covers a fixed 30-day snapshot window.
  */
 export const OVERVIEW_INTERVALS = [
   { label: "Today", days: 1 },
@@ -120,7 +118,7 @@ export default function OverviewPage() {
       <div className="max-w-[1280px] mx-auto p-6 animate-pulse">
         <div className="h-6 w-48 bg-border-muted rounded mb-4" />
         <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-          {Array.from({ length: 8 }).map((_, i) => (
+          {Array.from({ length: 7 }).map((_, i) => (
             <div key={i} className="card h-[88px]" />
           ))}
         </div>
@@ -137,13 +135,9 @@ export default function OverviewPage() {
   }
 
   const t = stats.totals;
-  const totalActions = stats.activity.reduce((a, b) => a + b.count, 0);
   // Follows and unfollows share ONE combined daily budget (50 actions),
   // so the meter always reflects the sum of both directions.
   const combinedToday = stats.today_follows + stats.today_unfollows;
-  const combinedPct = Math.round((combinedToday / stats.daily_limit) * 100);
-  const activityLabel =
-    days === 1 ? "Activity today" : `Activity (${days}d)`;
   const intervalWord = days === 1 ? "today" : `last ${days} days`;
 
   return (
@@ -185,7 +179,9 @@ export default function OverviewPage() {
         </div>
       </div>
 
-      {/* KPI cards */}
+      {/* KPI cards — fixed pipeline-flow layout (issue #18).
+          Top row:    Users discovered → Follows/Unfollows → Following now → Followbacks
+          Bottom row: Scored → ML followback candidates → GitHub API requests (4th slot empty) */}
       <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
         <StatCard
           label="Users discovered"
@@ -193,18 +189,33 @@ export default function OverviewPage() {
           icon={<Users size={16} />}
           sub={`${t.queue.toLocaleString()} awaiting processing`}
         />
+        {/* Combined card (issue #15): follows in green, unfollows in red,
+            black slash between, and the shared daily budget on the sub-line.
+            No accent: the value is fully colored by its own spans and the
+            budget pressure already reads numerically in the sub-line. */}
         <StatCard
-          label="Scored"
-          value={t.scored}
-          icon={<Target size={16} />}
-          sub={`${t.scored_positive.toLocaleString()} with score > 0`}
+          label="Follows/Unfollows"
+          value={
+            <span className="inline-flex items-baseline gap-x-1">
+              <span className="text-success-fg">{stats.today_follows}</span>
+              <span className="text-fg">/</span>
+              <span className="text-danger-fg">{stats.today_unfollows}</span>
+            </span>
+          }
+          icon={<TrendingUp size={16} />}
+          sub={`${combinedToday}/${stats.daily_limit} combined`}
         />
+        {/* Pipeline-state metric (issue #16): how many users are in the
+            followed status — NOT how many follow actions were performed
+            (that is the Follows/Unfollows card).  Renamed from "Followed"
+            so the two cards can't be confused. */}
         <StatCard
-          label="Followed"
+          label="Following now"
           value={t.followed}
           icon={<UserCheck size={16} />}
           accent="accent"
-          sub={`${t.unfollowed_after_mutual} unfollowed after mutual`}
+          sub={`${t.unfollowed_after_mutual} after mutual`}
+          hint={`Users in the followed status in this period · ${t.unfollowed_after_mutual} later unfollowed after a mutual follow`}
         />
         <StatCard
           label="Followbacks"
@@ -218,20 +229,10 @@ export default function OverviewPage() {
           }
         />
         <StatCard
-          label="Follows"
-          value={totalActions}
-          icon={<TrendingUp size={16} />}
-          accent={
-            combinedPct >= 90 ? "danger" : combinedPct >= 70 ? "attention" : "default"
-          }
-          sub={`${stats.today_follows} followed · ${stats.today_unfollows} unfollowed today — ${combinedToday}/${stats.daily_limit} combined`}
-        />
-        <StatCard
-          label="Unfollowed"
-          value={stats.today_unfollows}
-          icon={<UserMinus size={16} />}
-          accent="attention"
-          sub={`${t.unfollowed_no_interaction} total inactive (no interaction)`}
+          label="Scored"
+          value={t.scored}
+          icon={<Target size={16} />}
+          sub={`${t.scored_positive.toLocaleString()} with score > 0`}
         />
         <StatCard
           label="ML followback candidates"
@@ -239,12 +240,6 @@ export default function OverviewPage() {
           icon={<Sparkles size={16} />}
           accent="attention"
           sub="predicted likely to follow back"
-        />
-        <StatCard
-          label={activityLabel}
-          value={stats.total_actions}
-          icon={<Activity size={16} />}
-          sub="lifecycle events logged"
         />
         {/* The bold figure always reports the live per-hour request rate and
             its share of the hourly quota — regardless of the selected interval.
@@ -311,7 +306,7 @@ export default function OverviewPage() {
         </div>
 
         {/* Recent activity — lifecycle event stream (no job info here) */}
-        <div className="card p-4 lg:col-span-2 min-w-0">
+        <div className="card p-4 min-w-0">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-[14px] font-semibold">Recent activity</h2>
             <Link to="/manage" className="text-[12px] text-accent hover:underline">
@@ -354,6 +349,56 @@ export default function OverviewPage() {
                   </a>
                   <span className="ml-auto text-[12px] text-fg-subtle shrink-0">
                     {timeAgo(a.created_at)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Interactions — people who starred/forked/opened issues or PRs
+            on our repositories (issue #23).  Same visual language as the
+            Recent activity feed; refreshed by the same polling. */}
+        <div className="card p-4 min-w-0">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[14px] font-semibold">Interactions</h2>
+            <span className="text-[12px] text-fg-subtle">
+              stars · forks · issues · PRs
+            </span>
+          </div>
+          <div className="divide-y divide-border-muted">
+            {stats.interactions.length === 0 && (
+              <div className="py-6 text-center text-[13px] text-fg-subtle">
+                No interactions yet — when someone stars, forks or opens an
+                issue on your repositories, they appear here.
+              </div>
+            )}
+            {stats.interactions.slice(0, 6).map((it) => {
+              const meta = interactionMeta(it.event_type);
+              return (
+                <div
+                  key={it.event_id}
+                  className="py-2 flex items-center gap-2.5 min-w-0"
+                >
+                  <span
+                    className={`badge ${meta.cls} shrink-0`}
+                    title={it.event_type}
+                  >
+                    {meta.label}
+                  </span>
+                  <a
+                    href={`https://github.com/${it.username}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[13px] font-medium text-accent hover:underline truncate min-w-0"
+                  >
+                    {it.username}
+                  </a>
+                  <span className="text-[12px] text-fg-muted truncate min-w-0 hidden sm:inline">
+                    {it.repo_full_name?.split("/")[1] ?? ""}
+                  </span>
+                  <span className="ml-auto text-[12px] text-fg-subtle shrink-0">
+                    {timeAgo(it.created_at)}
                   </span>
                 </div>
               );

@@ -33,11 +33,13 @@ from core.logger import get_logger
 from services.collector import Collector
 from services.scorer import Scorer
 from services.silent import SilentRunner
+from workers.attention_worker import AttentionWorker
 from workers.company_worker import CompanyWorker
 from workers.follow_worker import FollowWorker
 from workers.followback_check_worker import FollowbackCheckWorker
 from workers.graph_discovery_worker import GraphDiscoveryWorker
 from workers.ml_trainer import MLTrainerWorker
+from workers.reciprocal_worker import ReciprocalWorker
 from workers.snapshot_worker import SnapshotWorker, take_snapshot_now
 from workers.unfollow_worker import UnfollowWorker
 
@@ -180,7 +182,23 @@ def main():
     # the bot can record the true outcome on exit (survives API restarts).
     job_id = os.environ.get("GITHUB_SOCIAL_JOB_ID")
 
-    # Ensure migrations have been applied before any DB operation
+    # Apply pending database migrations automatically at startup, so a
+    # container self-migrates on boot (no manual `python main.py --migrate`
+    # needed after pulling new code).  Explicit migration commands and
+    # --help keep their manual behaviour (--migrate applies, --migrate-status
+    # shows the real pending list, --help must not touch the DB).  The runner
+    # is lock-serialized, so the dashboard container auto-migrating at the
+    # same moment is safe.
+    if not ({"--migrate", "--migrate-status", "--help"} & set(sys.argv)):
+        try:
+            from migrations.runner import migrate
+            migrate()
+        except Exception as exc:
+            log.error("Automatic migration failed: %s", exc)
+            print(f"Error: automatic migration failed: {exc}")
+            sys.exit(1)
+
+    # Ensure the database is initialised before any DB operation
     if "--migrate" not in sys.argv and "--migrate-status" not in sys.argv and "--help" not in sys.argv:
         try:
             db = Database()
@@ -208,9 +226,11 @@ def main():
     long_running = {"--silent", "--collect", "--collect-users", "--collect-users-rep", "--score"}
     company_worker = None
     followback_worker = None
+    attention_worker = None
     follow_worker = None
     unfollow_worker = None
     ml_worker = None
+    reciprocal_worker = None
     snapshot_worker = None
     if long_running & set(sys.argv):
         # All background workers start unconditionally — whether each one
@@ -222,6 +242,12 @@ def main():
         company_worker.start()
         followback_worker = FollowbackCheckWorker(_shutdown)
         followback_worker.start()
+        # Reacts to inbound attention: records interactions with the
+        # owner's repos (star / fork / issue / PR / comment / follow) and
+        # adds new actors to the pipeline.  Persisted interactions also
+        # protect already-followed users from the unfollow worker.
+        attention_worker = AttentionWorker(_shutdown)
+        attention_worker.start()
         # The ONLY follow executor in the system — silent and the other
         # workers never subscribe; this thread drains the follow queue at
         # its own human-like pace, independent of the analysis pipeline.
@@ -237,6 +263,12 @@ def main():
         unfollow_worker.start()
         ml_worker = MLTrainerWorker(_shutdown)
         ml_worker.start()
+        # Answers attention with attention: follows new interactors and
+        # stars their most relevant repository, paced like follows within
+        # the shared daily budget.  Deliberately OPTIONAL (issue #24) —
+        # toggled from the Management tab like every other worker.
+        reciprocal_worker = ReciprocalWorker(_shutdown)
+        reciprocal_worker.start()
         snapshot_worker = SnapshotWorker(_shutdown)
         snapshot_worker.start()
 

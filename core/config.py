@@ -250,6 +250,51 @@ SILENT_MIN_OWNER_REPOS = 1
 SILENT_CONTINUOUS = True
 
 # =====================================================
+# ATTENTION WORKER — react to interactions with our repos
+# =====================================================
+
+# A dedicated daemon thread (workers/attention_worker.py) polls the owner's
+# received-events timeline once per hour, persists every interaction (star /
+# fork / issue / PR / comment / … on the owner's repositories, or a follow
+# of the owner) into the ``interactions`` table, adds new actors to the
+# pipeline queue (source ``repo_interaction``) and — via the persisted
+# interactions — protects already-followed users from the unfollow worker.
+#
+# ATTENTION_WORKER_ENABLED only seeds the *fresh-install* default of the
+# Management-tab toggle (migration 030); at runtime the worker's
+# enabled/disabled state lives in the worker_status table and is controlled
+# from the dashboard like every other worker.
+ATTENTION_WORKER_ENABLED = True
+
+# How often (hours) the attention worker polls the owner's event timeline.
+ATTENTION_POLL_INTERVAL_HOURS = 1
+
+# =====================================================
+# RECIPROCAL ACTIONS WORKER — answer attention with attention
+# =====================================================
+
+# A dedicated daemon thread (workers/reciprocal_worker.py) reacts to new
+# interactors recorded by the attention worker (issue #24): it follows them
+# (respecting the shared daily follow+unfollow budget and
+# ``SOCIAL_ACTION_LOCK``) and stars their most relevant repository (highest
+# stars / matching topics), paced with the same random 20-30 min interval
+# as the follow worker so the reciprocity never looks like spam.  Every
+# reciprocal action is recorded on the interaction (``we_followed_back`` /
+# ``we_starred``) so ML feature extraction can separate correlation from
+# causation (#25).
+#
+# Deliberately OPTIONAL and separate from the attention worker (#21): it
+# changes the bot's social behaviour, so it defaults to enabled but can be
+# toggled independently from the Management tab (worker_status table — the
+# flag below only seeds the fresh-install default, migration 031).
+RECIPROCAL_WORKER_ENABLED = True
+
+# How often (seconds) the worker re-polls the DB for new interactors when
+# the queue is empty (cheap, no API calls).  Real reciprocal actions are
+# paced by the same random 20-30 min interval as follows.
+RECIPROCAL_POLL_INTERVAL_SECONDS = 300
+
+# =====================================================
 # GRAPH DISCOVERY WORKER — separate calm background thread
 # =====================================================
 
@@ -267,6 +312,23 @@ SILENT_CONTINUOUS = True
 DISCOVERY_WORKER_ENABLED = True
 DISCOVERY_RATE_LIMIT_PER_HOUR = 500
 DISCOVERY_PASS_MAX_USERS = 500
+
+# Repo-content discovery (issue #22) — grow the network along the CONTENT
+# dimension, not just the follower graph.  The same calm worker additionally
+# mines the owner's own repositories (seeds, rotation tracked in the
+# ``discovery_sources`` table) for stargazers and optionally contributors —
+# people who already publicly declared interest in exactly the kind of
+# content the owner produces.  1 request ≈ up to 100 candidates, far more
+# throughput than graph walking for the same budget.
+#
+#   * ``DISCOVERY_REPO_FANS_ENABLED`` — master toggle for the pass.
+#   * ``DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS`` — also fetch
+#     contributors of each seed (stargazers are always fetched).
+#   * ``DISCOVERY_REPO_FANS_MAX_SEEDS`` — seeds mined per pass (each seed
+#     is 1-2 requests: stargazers + optional contributors).
+DISCOVERY_REPO_FANS_ENABLED = True
+DISCOVERY_REPO_FANS_INCLUDE_CONTRIBUTORS = True
+DISCOVERY_REPO_FANS_MAX_SEEDS = 5
 
 # =====================================================
 # ML — нейронная сеть для прогнозирования FOLLOWBACK

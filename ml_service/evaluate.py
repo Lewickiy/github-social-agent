@@ -47,9 +47,64 @@ def _build_vectors(db, usernames, metadata, top_langs, top_topics):
         vec = build_feature_vector(
             profile_json, repo_agg, user_langs, user_topics,
             top_langs, top_topics, metadata["feature_order"],
+            discovered_from=db.get_discovered_from(uname),
         )
         vectors.append(vec)
     return torch.tensor(vectors, dtype=torch.float32)
+
+
+def _per_source_auc(db, metadata, training):
+    """Per-source AUC breakdown over the labeled training set (issue #25).
+
+    Groups labeled users by their normalised discovery source
+    (stargazers / contributors / repo_interaction / owner_followers /
+    self / graph) and reports each channel's size and AUC, so the
+    evaluation shows whether the model discriminates within each
+    discovery channel rather than just overall.
+
+    *metadata* is the already-loaded model metadata (the caller has the
+    model loaded — no second disk read here).
+    """
+    from ml_service.features import normalise_source
+    from ml_service.trainer import _classification_metrics
+
+    model, _meta = load_model()
+    if model is None:
+        return []
+    # Use the caller's metadata (already loaded) for feature names —
+    # never re-read the model directory mid-evaluation.
+    meta = metadata
+    top_langs = [(n, 0) for n in meta["top_languages"]]
+    top_topics = [(n, 0) for n in meta["top_topics"]]
+
+    by_source = {}
+    for uname, lbl in training:
+        src = normalise_source(db.get_discovered_from(uname))
+        by_source.setdefault(src, []).append((uname, lbl))
+
+    out = []
+    for src in sorted(by_source):
+        group = by_source[src]
+        usernames = [u for u, _ in group]
+        labels = torch.tensor([l for _, l in group], dtype=torch.float32)
+        if len(usernames) < 2:
+            out.append({"source": src, "users": len(usernames), "auc": None})
+            continue
+        try:
+            X = _build_vectors(db, usernames, meta, top_langs, top_topics)
+            with torch.no_grad():
+                probs = model(X).squeeze(-1)
+            m = _classification_metrics(labels, probs)
+            out.append({
+                "source": src,
+                "users": len(usernames),
+                "auc": round(m["auc"], 3),
+                "pos": int(labels.sum()),
+            })
+        except Exception as exc:
+            out.append({"source": src, "users": len(usernames),
+                        "auc": None, "error": str(exc)})
+    return out
 
 
 def main():
@@ -112,6 +167,22 @@ def main():
         if pos_p:
             print(f"  pos mean prob={sum(pos_p) / len(pos_p):.3f}, "
                   f"neg mean prob={sum(neg_p) / len(neg_p):.3f}")
+
+        # Per-source AUC breakdown (issue #25) — the model's discrimination
+        # within each discovery channel.
+        per_source = _per_source_auc(db, metadata, training)
+        if per_source:
+            print("  per-source AUC:")
+            for row in per_source:
+                auc = (
+                    f"{row['auc']:.3f}" if row.get("auc") is not None
+                    else "n/a (too few)"
+                )
+                pos = row.get("pos", "?")
+                print(
+                    f"    {row['source']:<16s} n={row['users']:>3d} "
+                    f"pos={pos:>3d} AUC={auc}"
+                )
         print()
 
     # ── 2. Live NEW users (the scoring population) ──

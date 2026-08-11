@@ -33,6 +33,9 @@ export default function ManagementPage() {
     const [mlThreshold, setMlThreshold] = useState(0.5);
     const [mlSaving, setMlSaving] = useState(false);
     const [mlNotice, setMlNotice] = useState<string | null>(null);
+    // Server rejection of an enable attempt (e.g. model trend "Too early") —
+    // shown right under the switch so the reason is impossible to miss.
+    const [mlGateError, setMlGateError] = useState<string | null>(null);
     const mlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
@@ -67,6 +70,7 @@ export default function ManagementPage() {
         async (cfg: { enabled?: boolean; threshold?: number }) => {
             setMlSaving(true);
             setMlNotice(null);
+            setMlGateError(null);
             try {
                 await api.saveMLFollowConfig(cfg);
                 await load();
@@ -80,12 +84,21 @@ export default function ManagementPage() {
                     );
                 }
             } catch (e) {
-                setError((e as Error).message);
+                const message = (e as Error).message;
+                setError(message);
+                if (cfg.enabled !== undefined) {
+                    // The server rejected the change (e.g. the gate cannot
+                    // be enabled while the model trend is "Too early") —
+                    // snap the optimistic switch back to the server's value
+                    // and surface the reason right under the switch.
+                    setMlGateOn(config?.ml_follow_gate_enabled ?? false);
+                    setMlGateError(message);
+                }
             } finally {
                 setMlSaving(false);
             }
         },
-        [load]
+        [load, config]
     );
 
     const onMLThresholdChange = (value: number) => {
@@ -445,6 +458,11 @@ export default function ManagementPage() {
                                     {mlGateOn ? "On" : "Off"}
                                 </span>
                             </div>
+                            {mlGateError && (
+                                <p className="mt-2 text-[11px] text-danger-fg bg-danger-subtle border border-danger/40 rounded-md px-2 py-1.5 leading-snug">
+                                    {mlGateError}
+                                </p>
+                            )}
                             <p className="text-[12px] text-fg-muted mt-1.5 leading-snug">
                                 When on, the FollowWorker subscribes only to candidates
                                 whose ML followback confidence is at or above the

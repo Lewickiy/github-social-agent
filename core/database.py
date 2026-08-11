@@ -1548,6 +1548,318 @@ class Database:
         return [(r[0], r[1], r[2]) for r in rows]
 
     # --------------------------------------------------
+    # Discovery sources & interactions (issue #19)
+    # --------------------------------------------------
+    # Schema groundwork for the repo-content features: ``discovery_sources``
+    # tracks which repositories have already been mined for stargazers /
+    # contributors (seed rotation), and ``interactions`` persists every
+    # detected interaction with the owner's profile or repositories.  All
+    # methods degrade gracefully when the migration has not been applied
+    # (``_table_exists`` guard), mirroring the worker_status pattern.
+
+    def add_discovery_source(self, repo_full_name, source_type):
+        """Register a seed repository for repo-content discovery.
+
+        Idempotent — the UNIQUE (repo_full_name, source_type) pair makes
+        a re-registration a no-op.
+        """
+        if not self._table_exists("discovery_sources"):
+            return None
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO discovery_sources (repo_full_name, source_type) "
+            "VALUES (?, ?)",
+            (repo_full_name, source_type),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def seed_discovery_sources(self, source_types=("stargazers", "contributors")):
+        """Register the owner's own repositories as discovery seeds.
+
+        The seed set is the owner's repository list (already in the
+        ``repositories`` table).  Idempotent — already-registered
+        (repo, source_type) pairs are skipped via ``INSERT OR IGNORE``, so
+        calling this every pass is cheap and keeps the seed list in sync
+        as the owner publishes new repositories.  Returns the number of
+        seed rows newly registered.
+        """
+        if not self._table_exists("discovery_sources"):
+            return 0
+        owner = self.get_owner()
+        if not owner:
+            return 0
+        rows = self.conn.execute(
+            "SELECT name FROM repositories WHERE user_id = ?",
+            (owner,),
+        ).fetchall()
+        added = 0
+        for (name,) in rows:
+            full = f"{owner}/{name}"
+            for st in source_types:
+                if self.add_discovery_source(full, st):
+                    added += 1
+        return added
+
+    def get_discovery_sources(self):
+        """All discovery_sources rows as dicts (empty pre-migration)."""
+        if not self._table_exists("discovery_sources"):
+            return []
+        rows = self.conn.execute(
+            "SELECT id, repo_full_name, source_type, last_checked_at, last_count "
+            "FROM discovery_sources ORDER BY id"
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "repo_full_name": r[1],
+                "source_type": r[2],
+                "last_checked_at": r[3],
+                "last_count": r[4],
+            }
+            for r in rows
+        ]
+
+    def mark_discovery_source_checked(self, repo_full_name, source_type, last_count=None):
+        """Stamp a seed as mined now, with the last known result size.
+
+        The stale-seed rotation (``next_discovery_source``) uses
+        ``last_checked_at`` to pick the oldest un-mined repository.
+        """
+        if not self._table_exists("discovery_sources"):
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE discovery_sources SET last_checked_at = ?, last_count = ? "
+            "WHERE repo_full_name = ? AND source_type = ?",
+            (now, last_count, repo_full_name, source_type),
+        )
+        self.conn.commit()
+
+    def next_discovery_source(self, source_type=None):
+        """The least-recently-checked seed, or None when none exists.
+
+        Never-mined seeds (``last_checked_at IS NULL``) come first, then
+        the oldest check — so consecutive passes rotate through the seed
+        list instead of re-fetching the same repository.  *source_type*
+        narrows the pool to ``'stargazers'`` / ``'contributors'``.
+        """
+        if not self._table_exists("discovery_sources"):
+            return None
+        sql = "SELECT repo_full_name, source_type FROM discovery_sources WHERE 1 = 1"
+        params = []
+        if source_type:
+            sql += " AND source_type = ?"
+            params.append(source_type)
+        sql += (
+            " ORDER BY last_checked_at IS NOT NULL, last_checked_at ASC "
+            "LIMIT 1"
+        )
+        row = self.conn.execute(sql, params).fetchone()
+        return {"repo_full_name": row[0], "source_type": row[1]} if row else None
+
+    def record_interaction(
+        self, username, event_type, repo_full_name, event_id, created_at,
+        seen_at=None,
+    ):
+        """Persist one interaction, deduped on ``event_id``.
+
+        ``created_at`` is the REAL event timestamp from the GitHub event
+        object (never the ingestion time) — required for temporal hygiene
+        in ML feature extraction.  Returns True when a new row was
+        inserted, False when the event was already recorded (or the table
+        does not exist yet).
+        """
+        if not self._table_exists("interactions"):
+            return False
+        seen_at = seen_at or datetime.now(timezone.utc).isoformat()
+        # Normalise the REAL event timestamp to the same ISO format the rest
+        # of the DB uses (``...+00:00`` instead of GitHub's ``...Z``).  The
+        # as-of ML queries string-compare created_at against follow
+        # timestamps, and ``"Z"`` vs ``"+00:00"`` would sort wrongly at the
+        # boundary second ('Z' > '+') — normalising keeps the comparison
+        # exact regardless of which format a caller passes.
+        created_at = (created_at or "").replace("Z", "+00:00")
+        cur = self.conn.execute(
+            """
+            INSERT OR IGNORE INTO interactions
+                (username, event_type, repo_full_name, event_id, created_at, seen_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (username, event_type, repo_full_name, event_id, created_at, seen_at),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_followed_at(self, username):
+        """Time we followed *username* (from ``user_current_status``).
+
+        None when the user has never been followed — the ML feature
+        extractor treats that as "no follow yet" and falls back to no
+        interaction features (nothing to be temporally hygienic about).
+        """
+        row = self.conn.execute(
+            "SELECT followed_at FROM user_current_status WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def get_discovered_from(self, username):
+        """The raw ``users.discovered_from`` value for *username*.
+
+        May be a bare category (``owner_followers``, ``self``,
+        ``repo_interaction``), a prefixed value (``stargazers:owner/repo``,
+        ``contributors:owner/repo``) or a scanned username (the graph
+        walk writes the scanned user's login).  The ML source feature
+        normalises this to a fixed category set (issue #25).
+        """
+        row = self.conn.execute(
+            "SELECT discovered_from FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def user_interactions_before(self, username, ts):
+        """Interactions of *username* with ``created_at <= ts`` (as-of query).
+
+        Used by the ML feature extractor: features must come only from
+        interactions that happened BEFORE the follow timestamp — anything
+        after the follow would leak the label.  Strictly ``<`` (created_at
+        is normalised to the same ISO format at insert time, so the string
+        comparison is exact).
+        """
+        if not self._table_exists("interactions"):
+            return []
+        rows = self.conn.execute(
+            "SELECT username, event_type, repo_full_name, event_id, created_at "
+            "FROM interactions WHERE username = ? AND created_at < ? "
+            "ORDER BY created_at",
+            (username, ts),
+        ).fetchall()
+        return [
+            {
+                "username": r[0],
+                "event_type": r[1],
+                "repo_full_name": r[2],
+                "event_id": r[3],
+                "created_at": r[4],
+            }
+            for r in rows
+        ]
+
+    def user_has_persisted_interaction(self, username):
+        """True when *username* has at least one recorded interaction.
+
+        The unfollow worker consults this before unfollowing: a user with
+        a persisted interaction must never be unfollowed.
+        """
+        if not self._table_exists("interactions"):
+            return False
+        row = self.conn.execute(
+            "SELECT 1 FROM interactions WHERE username = ? LIMIT 1",
+            (username,),
+        ).fetchone()
+        return row is not None
+
+    def mark_reciprocal_action(self, event_id, kind):
+        """Record a reciprocal action on an interaction (issue #24).
+
+        *kind* is ``'star'`` (we starred the actor's repo) or ``'follow'``
+        (we followed the actor) — mapped to ``we_starred`` /
+        ``we_followed_back``.  The columns exist from day one so #24 needs
+        no schema change.
+        """
+        if kind not in ("star", "follow"):
+            return
+        if not self._table_exists("interactions"):
+            return
+        col = "we_starred" if kind == "star" else "we_followed_back"
+        self.conn.execute(
+            f"UPDATE interactions SET {col} = 1 WHERE event_id = ?",
+            (event_id,),
+        )
+        self.conn.commit()
+
+    def next_interactor_needing_reciprocation(self):
+        """Username of the oldest interactor still needing a reciprocal action.
+
+        An interactor "needs reciprocation" while any of their recorded
+        interactions has ``we_followed_back = 0`` or ``we_starred = 0``
+        (issue #24).  Deleted users are excluded (nothing to answer).
+        Returns None when everyone has been answered.
+        """
+        if not self._table_exists("interactions"):
+            return None
+        row = self.conn.execute(
+            """
+            SELECT i.username
+            FROM interactions i
+            LEFT JOIN user_current_status c ON c.username = i.username
+            WHERE (i.we_followed_back = 0 OR i.we_starred = 0)
+              AND COALESCE(c.status, 'NEW') != 'DELETED'
+            GROUP BY i.username
+            ORDER BY MIN(i.seen_at) ASC, MIN(i.id) ASC
+            LIMIT 1
+            """,
+        ).fetchone()
+        return row[0] if row else None
+
+    def mark_user_reciprocal(self, username, kind):
+        """Record a reciprocal action on ALL of *username*'s interactions.
+
+        *kind* is ``'star'`` or ``'follow'`` — mapped to ``we_starred`` /
+        ``we_followed_back`` (issue #24).  The reciprocal action applies to
+        the person, so every interaction they produced is stamped at once.
+        """
+        if kind not in ("star", "follow"):
+            return
+        if not self._table_exists("interactions"):
+            return
+        col = "we_starred" if kind == "star" else "we_followed_back"
+        self.conn.execute(
+            f"UPDATE interactions SET {col} = 1 WHERE username = ?",
+            (username,),
+        )
+        self.conn.commit()
+
+    def list_interactions(self, limit=12, actor=None, event_type=None):
+        """Most recent interactions, newest first (issue #23 dashboard feed).
+
+        *actor* / *event_type* optionally narrow the feed (exact match —
+        the dashboard filter dropdown sends the raw values).  Returns an
+        empty list when the migration has not been applied.
+        """
+        if not self._table_exists("interactions"):
+            return []
+        sql = (
+            "SELECT username, event_type, repo_full_name, event_id, "
+            "created_at, seen_at, we_starred, we_followed_back "
+            "FROM interactions WHERE 1 = 1"
+        )
+        params = []
+        if actor:
+            sql += " AND username = ?"
+            params.append(actor)
+        if event_type:
+            sql += " AND event_type = ?"
+            params.append(event_type)
+        sql += " ORDER BY seen_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [
+            {
+                "username": r[0],
+                "event_type": r[1],
+                "repo_full_name": r[2],
+                "event_id": r[3],
+                "created_at": r[4],
+                "seen_at": r[5],
+                "we_starred": r[6],
+                "we_followed_back": r[7],
+            }
+            for r in rows
+        ]
+
+    # --------------------------------------------------
     # ML — training data & predictions
     # --------------------------------------------------
 

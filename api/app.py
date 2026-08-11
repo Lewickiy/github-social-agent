@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from api.queries import (
     ml_state,
     overview_stats,
     recent_actions,
+    recent_interactions,
     score_buckets,
     status_distribution,
     total_actions,
@@ -67,7 +69,28 @@ JOB_MODES = {
     "snapshot": ["--snapshot"],
 }
 
-app = FastAPI(title="GitHub Social Dashboard", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Apply pending DB migrations before the dashboard serves requests.
+
+    The bot container auto-migrates on startup (main.py); the dashboard
+    does the same here so a fresh deploy works immediately and both
+    containers converge.  The runner is lock-serialized, so simultaneous
+    startup of bot + dashboard is safe (the second simply sees nothing
+    pending).  A migration failure is fatal on purpose: serving queries
+    against a stale schema would be worse than not serving at all.
+    """
+    try:
+        from migrations.runner import migrate
+        migrate()
+        log.info("Dashboard startup: database migrations applied.")
+    except Exception:
+        log.exception("Dashboard startup: automatic migration failed")
+        raise
+    yield
+
+
+app = FastAPI(title="GitHub Social Dashboard", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -338,6 +361,11 @@ def stats(days: int = Query(30, ge=1, le=365)):
             "status_distribution": status_distribution(db, days=days),
             "score_buckets": score_buckets(db, days=days),
             "recent_actions": recent_actions(db, days=days),
+            # People who interacted with our repos (issue #23) — always the
+            # latest feed, regardless of the interval toggle (interactions
+            # are their own timeline; the window toggle scopes the activity
+            # blocks only).
+            "interactions": recent_interactions(db, limit=8),
         }
     finally:
         db.conn.close()
@@ -416,6 +444,27 @@ def actions(days: int = Query(30, ge=1, le=365)):
     db = _db()
     try:
         return {"activity": activity_timeline(db, days=days)}
+    finally:
+        db.conn.close()
+
+
+@app.get("/api/interactions")
+def interactions(
+    limit: int = Query(12, ge=1, le=100),
+    actor: str | None = Query(None),
+    event_type: str | None = Query(None),
+):
+    """People who interacted with our repositories (issue #23).
+
+    Latest N rows of the ``interactions`` table, optionally filtered by
+    actor / event type.  Powers the Overview "Interactions" feed — the
+    attention the bot receives (stars, forks, issues, PRs on our repos).
+    """
+    db = _db()
+    try:
+        return {"items": recent_interactions(
+            db, limit=limit, actor=actor, event_type=event_type,
+        )}
     finally:
         db.conn.close()
 
@@ -557,6 +606,26 @@ def _ml_follow_config_view(db):
     }
 
 
+def _ml_follow_gate_block_reason(trend):
+    """Human-readable reason the gate cannot be enabled, or None.
+
+    Hard block: while the ML trend verdict is red ("Too early") the gate
+    must stay off — the model has not proven itself yet, so acting on its
+    predictions would veto follow candidates based on noise.  Disabling
+    the gate or tuning the threshold are always allowed (both are
+    harmless while the gate is off), so only ``enabled=True`` is checked.
+    """
+    if trend.get("level") != "red":
+        return None
+    label = trend.get("label") or "Too early"
+    verdict = trend.get("verdict") or ""
+    return (
+        f"Cannot enable the ML follow gate while the model is in "
+        f"\"{label}\" state. {verdict} The gate stays off (shadow mode) "
+        f"until the model proves itself — track progress on the ML tab."
+    )
+
+
 def _kick_ml_recompute():
     """Recompute all stored predictions in a background thread.
 
@@ -603,6 +672,11 @@ def ml_follow_config_set(payload: MLFollowConfig):
     background recompute of every stored prediction, so the gate and the
     dashboard's "ML candidates" stat switch over immediately.
 
+    Hard block: while the ML trend verdict is red ("Too early") the gate
+    cannot be switched ON — the request is rejected with 409 and a
+    readable reason (the model has not proven itself yet).  Disabling the
+    gate and tuning the threshold remain allowed in that state.
+
     The recompute is best-effort: it is skipped when one is already
     running (the bot process may be recomputing after a daily retrain).
     In that case labels converge at the next scoring pass or retrain —
@@ -611,6 +685,15 @@ def ml_follow_config_set(payload: MLFollowConfig):
     db = _db()
     threshold_changed = False
     try:
+        # Hard block: switching the gate ON is rejected while the ML
+        # trend is red ("Too early") — see _ml_follow_gate_block_reason.
+        # The 409 carries a human-readable detail the UI shows verbatim.
+        # Reusing ml_state guarantees the exact verdict the ML tab shows
+        # (a few counting queries on a rare user action — fine).
+        if payload.enabled is True:
+            reason = _ml_follow_gate_block_reason(ml_state(db)["trend"])
+            if reason:
+                raise HTTPException(status_code=409, detail=reason)
         if payload.threshold is not None:
             if not 0.0 <= payload.threshold <= 1.0:
                 raise HTTPException(
